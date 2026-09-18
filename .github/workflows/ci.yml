@@ -1,0 +1,25 @@
+# Calls the canonical plugin-ci reusable workflow (GetBusbar/busbar/.github/workflows/plugin-ci.yml)
+# instead of hand-copying build/test/signoff steps here — see that file for what actually runs.
+name: ci
+
+on:
+  push:
+    branches: [main, dev, qa]
+  pull_request:
+    branches: [main, dev, qa]
+  # Manual trigger. Needed because `gh run rerun` PINS the reusable-workflow SHA:
+  # a rerun re-uses the plugin-ci.yml snapshot from the original run, so a fix landing in
+  # core's reusable workflow can only be picked up by a NEW run, never by rerunning an old one.
+  workflow_dispatch: {}
+jobs:
+  ci:
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@dev
+    with:
+      plugin_crate: busbar-export-otlp-plugin
+      plugin_kind: export
+      plugin_alias: otlp
+      service: none
+      busbar_ref: ${{ github.base_ref || github.ref_name }}
+      # base_ref FIRST: on a pull_request `github.ref_name` is '<number>/merge', not a branch name,
+      # so this would otherwise ask busbar for a branch called '5/merge' and the sibling checkout
+      # would die on EVERY pull request. Same-branch intent: qa builds core qa, dev builds core dev.

@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# One repo per plugin (DECISIONS #31): this repo brings 100% of what the otlp export sink needs —
+# the real export logic (busbar-export-otlp, an rlib) plus the thin dlopen ABI adapter that packages it as a
+# busbar `kind: export` plugin (busbar-export-otlp-plugin, a cdylib). Both live here as a same-repo Cargo workspace.
+# Only busbar-plugin-sdk (and, for the adapter's dev-dependencies, busbar-plugin-loader) still reach
+# into a sibling busbar checkout, since those are core-engine contracts every plugin depends on the
+# same way.
+#
+# SCAFFOLD (busbar 1.6.0, DECISIONS #3 export impls / #30 COLD-JSON lane / #11 both-ways): the plugin
+# body is a COMPILING SKELETON whose `open` returns a clear `unimplemented` — the byte-identical
+# extraction of the real sink logic out of busbar-core is a separate, oracle-gated step.
+[workspace]
+resolver = "2"
+members = [
+    "export-otlp",
+    "export-otlp-plugin",
+]

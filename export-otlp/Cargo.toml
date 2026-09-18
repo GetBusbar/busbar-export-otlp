@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "busbar-export-otlp"
+version = "1.0.0"
+publish = false            # internal workspace crate; never goes to crates.io
+edition = "2021"
+rust-version = "1.97"
+description = "the built-in OTLP/HTTP trace exporter (Traces stream), packaged as busbar's kind:export sink logic. SCAFFOLD: skeleton pending byte-identical extraction from busbar-core."
+license = "Apache-2.0"
+
+[dependencies]
+# INTERIM: busbar isn't public yet, so this is a local path dependency into a sibling checkout. Once
+# busbar ships publicly this becomes a git (pinned rev/tag) or crates.io dependency instead. The SDK
+# re-exports the export ABI wire types (ExportHandler / ExportStream / ExportField / Route), so the
+# sink logic names them without a direct busbar-plugin dependency.
+busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
+serde = "1"
+serde_json = "1"

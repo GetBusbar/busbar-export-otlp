@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "busbar-export-otlp-plugin"
+version = "1.0.0"
+publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
+edition = "2021"
+rust-version = "1.97"
+description = "First-party signed kind:export plugin cdylib: the built-in OTLP/HTTP trace exporter (Traces stream), packaged as a droppable busbar plugin exporting the neutral six-symbol C ABI. SCAFFOLD pending extraction."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the unit tests / e2e test can exercise it as a normal crate too
+
+[dependencies]
+# busbar-export-otlp is a SAME-REPO sibling crate (this plugin brings 100% of what it needs). Only
+# busbar-plugin-sdk still reaches into busbar — INTERIM local path dependency into a sibling checkout,
+# since busbar isn't public yet; once it ships publicly this becomes a git (pinned rev/tag) or
+# crates.io dependency instead.
+busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
+busbar-export-otlp = { path = "../export-otlp" }
+serde_json = "1"
+
+[dev-dependencies]
+# INTERIM local path dep into busbar, dev-only. The end-to-end test loads the built cdylib over the
+# real loader ABI seam, so it needs the real loader — never shipped in the plugin artifact itself.
+busbar-plugin-loader = { path = "../../busbar/crates/plugin-loader" }
