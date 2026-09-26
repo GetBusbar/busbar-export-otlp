@@ -1,5 +1,13 @@
-# Calls the canonical plugin-ci reusable workflow (GetBusbar/busbar/.github/workflows/plugin-ci.yml)
-# instead of hand-copying build/test/signoff steps here — see that file for what actually runs.
+# export-otlp CI — build, test, and the sink's linked + dropped-in conformance, against the busbar
+# rev this repo PINS.
+#
+# This repo builds standalone: its only busbar dependency (busbar-contract, and busbar-plugin-loader
+# for the conformance test) is a `git` dependency on https://github.com/GetBusbar/busbar at the rev in
+# field 1 of `.busbar-ref`. No sibling checkout, no path dependency — so what CI proves is exactly
+# what a busbar build that pulls this repo at a pinned rev links.
+#
+# The moving leg (this repo's `dev` against busbar's `predev`) is busbar's side of the contract: its
+# ci.yml `consumers` job builds this repo's `dev` with busbar-contract (and busbar-plugin-loader) patched to busbar's own tree.
 name: ci
 
 on:
@@ -7,19 +15,58 @@ on:
     branches: [main, dev, qa]
   pull_request:
     branches: [main, dev, qa]
-  # Manual trigger. Needed because `gh run rerun` PINS the reusable-workflow SHA:
-  # a rerun re-uses the plugin-ci.yml snapshot from the original run, so a fix landing in
-  # core's reusable workflow can only be picked up by a NEW run, never by rerunning an old one.
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
 jobs:
-  ci:
-    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@dev
-    with:
-      plugin_crate: busbar-export-otlp-plugin
-      plugin_kind: export
-      plugin_alias: otlp
-      service: none
-      busbar_ref: ${{ github.base_ref || github.ref_name }}
-      # base_ref FIRST: on a pull_request `github.ref_name` is '<number>/merge', not a branch name,
-      # so this would otherwise ask busbar for a branch called '5/merge' and the sibling checkout
-      # would die on EVERY pull request. Same-branch intent: qa builds core qa, dev builds core dev.
+  pin:
+    name: the busbar pin is one rev
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Every `rev = "..."` on the busbar git source in every manifest is field 1 of `.busbar-ref`.
+      # Two revs would link two copies of the contract; a rev that disagrees with `.busbar-ref` makes
+      # the pin a lie about what the release builds against.
+      - name: every busbar git dependency names the .busbar-ref rev
+        run: |
+          set -euo pipefail
+          pin=$(awk '{print $1; exit}' .busbar-ref)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::.busbar-ref field 1 is not a full sha: '$pin'"; exit 1; }
+          found=$(grep -hoE 'git = "https://github.com/GetBusbar/busbar", rev = "[0-9a-f]+"' */Cargo.toml | grep -oE '[0-9a-f]{40}' | sort -u)
+          [ -n "$found" ] || { echo "::error::no busbar git dependency found"; exit 1; }
+          if [ "$found" != "$pin" ]; then
+            echo "::error::busbar revs in manifests ($found) != .busbar-ref ($pin)"; exit 1
+          fi
+          if grep -nE 'path = "\.\./\.\./' */Cargo.toml; then
+            echo "::error::a manifest names a sibling-checkout path dependency"; exit 1
+          fi
+          echo "pinned busbar rev: $pin"
+
+  build-test:
+    name: fmt, clippy, build, test, conformance [${{ matrix.os }}]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
+        with:
+          components: clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: build (the rlib the busbar root links, and the cdylib a signed tarball carries)
+        run: cargo build --workspace --locked
+      - name: test (the sink's own suite + linked/dropped-in conformance over the real loader)
+        run: cargo test --workspace --locked

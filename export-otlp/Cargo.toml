@@ -1,18 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-export-otlp"
-version = "1.0.0"
-publish = false            # internal workspace crate; never goes to crates.io
+version = "1.6.0"
 edition = "2021"
 rust-version = "1.97"
-description = "the built-in OTLP/HTTP trace exporter (Traces stream), packaged as busbar's kind:export sink logic. SCAFFOLD: skeleton pending byte-identical extraction from busbar-core."
+description = "The OTLP trace export sink as a kind:export plugin: encodes each record of busbar's traces stream as an OTLP/HTTP protobuf ExportTraceServiceRequest and has the host POST it to the operator's collector through its egress carrier (it never dials), linked into the busbar binary or dropped into plugins/ — one crate, one registration."
 license = "Apache-2.0"
+publish = false
+
+[lib]
+# rlib: THE LOGIC. The busbar composition root links it (its `linked::EXPORT` row and
+# `BUSBAR_COLD_ENTRY`), and the sibling `busbar-export-otlp-plugin` cdylib re-exports it as the
+# dropped-in door. One source, both doors (DECISIONS #2 rule (1)).
+crate-type = ["rlib"]
 
 [dependencies]
-# INTERIM: busbar isn't public yet, so this is a local path dependency into a sibling checkout. Once
-# busbar ships publicly this becomes a git (pinned rev/tag) or crates.io dependency instead. The SDK
-# re-exports the export ABI wire types (ExportHandler / ExportStream / ExportField / Route), so the
-# sink logic names them without a direct busbar-plugin dependency.
-busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
-serde = "1"
+# The ONE busbar crate a plugin names (#40: contract only; DECISIONS #84 merged the plugin SDK into it
+# as `busbar_contract::abi::sdk`, so a plugin's busbar closure is exactly busbar-contract). Pinned by
+# git rev to the busbar commit in `.busbar-ref`; a busbar build that links this crate `[patch]`es the
+# busbar git source to its own tree, so ONE copy of the contract links.
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "5b516175683061eae67ea6305911dcb2cf945067" }
+# The settings shape (`deny_unknown_fields`, so the operator's typo is the same refusal it was).
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The operator's endpoint: its userinfo moves into an `Authorization: Basic` header and out of the
+# URL, and is masked in every line this sink writes.
+url = "2"
+# The sink's own operator lines (enabled, disabled, a dropped export). Linked, they reach the host's
+# subscriber directly; dropped in, the SDK's bridge forwards them to the host's sink.
+tracing = "0.1"
+
+[dev-dependencies]
+# The OpenTelemetry project's own generated OTLP types: the sink's suite decodes every request it
+# builds with them and re-encodes it, so "an OTLP/HTTP protobuf ExportTraceServiceRequest" is
+# checked against the proto's publisher, not against this crate's own encoder. Test-only.
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
+# To read the lines the sink writes, in its own suite.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }

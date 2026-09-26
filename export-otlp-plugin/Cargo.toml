@@ -1,26 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-export-otlp-plugin"
-version = "1.0.0"
+version = "1.6.0"
 publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
 edition = "2021"
 rust-version = "1.97"
-description = "First-party signed kind:export plugin cdylib: the built-in OTLP/HTTP trace exporter (Traces stream), packaged as a droppable busbar plugin exporting the neutral six-symbol C ABI. SCAFFOLD pending extraction."
+description = "First-party signed kind:export plugin cdylib: the OTLP trace export sink (`module: otlp`), packaged as a droppable busbar plugin. Drop the signed tarball into `plugins/` and name it from an `export.<name>.module: otlp` block."
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the unit tests / e2e test can exercise it as a normal crate too
+# cdylib: the DROPPED-IN door (a signed tarball in `plugins/`). rlib: REQUIRED for `cargo test` to
+# emit the cdylib artifact the conformance test packs (a cdylib-only package builds a trivial test
+# harness and never produces the .so/.dylib — the store-postgres-plugin / store-mysql-plugin note).
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# busbar-export-otlp is a SAME-REPO sibling crate (this plugin brings 100% of what it needs). Only
-# busbar-plugin-sdk still reaches into busbar — INTERIM local path dependency into a sibling checkout,
-# since busbar isn't public yet; once it ships publicly this becomes a git (pinned rev/tag) or
-# crates.io dependency instead.
-busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
+# THE LOGIC, same repo. Its `export_export_plugin!(open)` registers the image's one door; this crate
+# only makes that door a loadable library.
 busbar-export-otlp = { path = "../export-otlp" }
-serde_json = "1"
 
 [dev-dependencies]
-# INTERIM local path dep into busbar, dev-only. The end-to-end test loads the built cdylib over the
-# real loader ABI seam, so it needs the real loader — never shipped in the plugin artifact itself.
-busbar-plugin-loader = { path = "../../busbar/crates/plugin-loader" }
+# The conformance test loads the built cdylib over the REAL loader (sign, pack, scan, open) and the
+# linked row through the same registry — dev-only, never in the shipped artifact. Same pinned rev as
+# the logic crate's busbar-contract, so one busbar source resolves.
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "5b516175683061eae67ea6305911dcb2cf945067" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "5b516175683061eae67ea6305911dcb2cf945067" }
+serde_json = "1"
+# The OpenTelemetry project's own generated OTLP types, to decode what the host was asked to carry.
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
