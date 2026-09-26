@@ -25,8 +25,8 @@
 //! `…; disabling OTLP trace export` and takes no span this run; admitted, it logs `OTLP tracing
 //! enabled` and is fed at the host's default admission.
 //!
-//! **Settings** ([`OtlpSettings`]): `url`, required. At most one `module: otlp` instance, refused
-//! with the words 1.5.x used ([`ExportHandler::check`]).
+//! **Settings** ([`OtlpSettings`]): `url`, required. At most one `module: otlp` instance: the host
+//! refuses a second while it resolves its configuration, in the words and at the place 1.5.x did.
 //!
 //! The one registration both doors take states [`NAME`], [`ALIAS`] and [`DECLARES`] (the manifest
 //! `declares` section its signed tarball carries: the collector egress policy) over its boundary —
@@ -38,7 +38,7 @@ pub mod config;
 pub mod proto;
 
 use busbar_contract::abi::sdk::{
-    CheckPhase, ExportHandler, ExportStream, HostOp, HostResult, HostStep, HttpRequest,
+    ExportHandler, ExportStream, HostOp, HostResult, HostStep, HttpRequest,
 };
 pub use config::OtlpSettings;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,10 +81,6 @@ impl ExportHandler for Otlp {
             Ok(_) => Vec::new(),
             Err(e) => vec![format!("export.{instance}.settings: {e}")],
         }
-    }
-
-    fn check(&self, phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
-        check(phase, instances)
     }
 
     fn start(&self) -> HostStep {
@@ -166,29 +162,6 @@ fn started(live: bool) -> HostStep {
         inflight: 0,
         gate: String::new(),
     }
-}
-
-/// The checks the configuration's VALIDATION runs across every `otlp` instance, after the limits
-/// ([`CheckPhase::Instances`]): a SECOND instance is refused in the words 1.5.x refused it with,
-/// naming the instance that claimed the module first.
-pub fn check(phase: CheckPhase, instances: &[(String, serde_json::Value)]) -> Vec<String> {
-    if phase != CheckPhase::Instances {
-        return Vec::new();
-    }
-    let Some((owner, _)) = instances.first() else {
-        return Vec::new();
-    };
-    instances
-        .iter()
-        .skip(1)
-        .map(|(name, _)| {
-            format!(
-                "export.{name}: a second `module: otlp` instance (already defined as '{owner}'). \
-                 OTLP installs the ONE process-global tracer subscriber, so a second instance \
-                 could only be silently ignored — keep a single instance."
-            )
-        })
-        .collect()
 }
 
 /// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;

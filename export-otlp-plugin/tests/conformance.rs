@@ -316,7 +316,8 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
         "Ok(Some((true, 0, \\\"\\\")))",
         "Ok(Some((false, 0, \\\"\\\")))",
         "unknown field `otlp_endpoint`, expected `url`",
-        "export.again: a second `module: otlp` instance (already defined as 'traces')",
+        // The sink has no checks of its own: the host refuses a second instance while resolving.
+        "\"]), Some([]))",
         "[Traces]",
     ] {
         assert!(

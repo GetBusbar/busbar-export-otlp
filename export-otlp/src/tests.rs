@@ -138,26 +138,6 @@ fn settings_refuse_in_the_grammars_words() {
     );
 }
 
-/// A second instance is refused, naming the first, in 1.5.x's words; one instance, and the limits
-/// phase, report nothing.
-#[test]
-fn a_second_instance_is_refused_in_the_words_it_always_was() {
-    let url = json!({"url": "http://localhost:4318/v1/traces"});
-    let one = [("traces".to_string(), url.clone())];
-    assert!(check(CheckPhase::Instances, &one).is_empty());
-    let two = [one[0].clone(), ("more".to_string(), url)];
-    assert!(check(CheckPhase::Limits, &two).is_empty());
-    assert_eq!(
-        check(CheckPhase::Instances, &two),
-        vec![
-            "export.more: a second `module: otlp` instance (already defined as 'traces'). OTLP \
-             installs the ONE process-global tracer subscriber, so a second instance could only \
-             be silently ignored — keep a single instance."
-                .to_string()
-        ]
-    );
-}
-
 /// Start asks the host's policy about the endpoint AS WRITTEN (its refusal names it masked); the
 /// answer decides whether the sink takes spans this run.
 #[test]
