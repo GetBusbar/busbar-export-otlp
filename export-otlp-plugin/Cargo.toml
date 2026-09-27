@@ -23,8 +23,8 @@ busbar-export-otlp = { path = "../export-otlp" }
 # The conformance test loads the built cdylib over the REAL loader (sign, pack, scan, open) and the
 # linked row through the same registry — dev-only, never in the shipped artifact. Same pinned rev as
 # the logic crate's busbar-contract, so one busbar source resolves.
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "5b516175683061eae67ea6305911dcb2cf945067" }
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "5b516175683061eae67ea6305911dcb2cf945067" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
 serde_json = "1"
 # The OpenTelemetry project's own generated OTLP types, to decode what the host was asked to carry.
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
