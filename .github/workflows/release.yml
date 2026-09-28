@@ -32,10 +32,10 @@ jobs:
     uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@7a5b429041752e00375e120ab1547a8928c3dee4
     with:
       plugin_crate: busbar-export-otlp-plugin
-      manifest_name: busbar-export-otlp-plugin
+      manifest_name: busbar-export-otlp
       plugin_alias: otlp
       plugin_kind: export
-      asset_prefix: busbar-export-otlp-plugin
+      asset_prefix: busbar-export-otlp
       description: "First-party signed kind:export plugin cdylib: the OTLP trace export sink (module: otlp), packaged as a droppable busbar plugin. Drop the signed tarball into plugins/ and name it from an export.<name>.module: otlp block."
       lib_only: false
       needs_prompt: ""
@@ -48,8 +48,8 @@ jobs:
     uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@7a5b429041752e00375e120ab1547a8928c3dee4
     with:
       version: ${{ github.ref_name }}
-      asset_prefix: busbar-export-otlp-plugin
-      plugin_name: busbar-export-otlp-plugin
+      asset_prefix: busbar-export-otlp
+      plugin_name: busbar-export-otlp
       plugin_alias: otlp
       plugin_kind: export
       bundle_image: ""
