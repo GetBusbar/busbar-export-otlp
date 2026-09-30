@@ -67,3 +67,37 @@ fn the_enabled_line_is_the_admissions_and_a_refusal_says_export_is_disabled() {
         ]
     );
 }
+
+/// EOTLP-2: the delivery-time lines (non-2xx, failed) carry the masked endpoint, never the secret.
+#[test]
+fn the_delivery_lines_mask_the_credential() {
+    use busbar_contract::abi::sdk::HttpResponse;
+    let lines = Lines::default();
+    let subscriber = tracing_subscriber::registry().with(lines.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        let sink =
+            busbar_export_otlp::open(r#"{"url":"https://u:s3cret@collector.example/v1/traces"}"#)
+                .expect("opens");
+        let refused = HostResult::Http(HttpResponse {
+            status: 500,
+            body: String::new(),
+        });
+        assert_eq!(sink.resume(1, vec![refused]), HostStep::Done);
+        let failed = HostResult::Failed {
+            step: "request".into(),
+            error: "reset".into(),
+            rotation: None,
+        };
+        assert_eq!(sink.resume(2, vec![failed]), HostStep::Done);
+    });
+    let got = lines.0.lock().unwrap().clone();
+    assert_eq!(got.len(), 2, "{got:?}");
+    for line in &got {
+        assert!(line.starts_with("DEBUG"), "{line}");
+        assert!(
+            line.contains("endpoint=https://***@collector.example/v1/traces"),
+            "{line}"
+        );
+        assert!(!line.contains("s3cret"), "{line}");
+    }
+}
