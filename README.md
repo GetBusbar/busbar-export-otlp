@@ -9,3 +9,27 @@ First-party signed kind:export plugin cdylib: the OTLP trace export sink (module
 
 [![ci](https://github.com/GetBusbar/busbar-export-otlp/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-export-otlp/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
+
+## What it is for
+
+`busbar-export-otlp` is a `kind: export` busbar plugin.
+
+## Config
+
+Configured under the `otlp` module name.
+
+## Build
+
+```bash
+cargo build --release -p busbar-export-otlp-plugin
+```
+
+## Tests
+
+```bash
+cargo test --workspace --locked
+```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

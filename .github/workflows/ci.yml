@@ -21,4 +21,7 @@ jobs:
       busbar_checkout: false
       macos_test: "cargo test --workspace --locked"
       extra_test: ""
+      plugin_crate: busbar-export-otlp-plugin
+      plugin_kind: export
+      plugin_alias: otlp
     secrets: inherit
