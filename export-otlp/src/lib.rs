@@ -218,6 +218,7 @@ fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         let hex_pair = bytes
             .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
             .and_then(|h| std::str::from_utf8(h).ok());
         match (
             bytes[i],

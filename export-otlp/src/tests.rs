@@ -206,6 +206,16 @@ fn a_delivery_asks_the_host_to_post_the_request_with_the_credential_moved_to_a_h
     );
 }
 
+/// EOTLP-1: `from_str_radix` accepts a leading `+`, so `%+4` must stay literal (1.5.5 bytes).
+#[test]
+fn a_plus_after_percent_is_not_an_escape() {
+    assert_eq!(percent_decode("ab%+41cd"), "ab%+41cd");
+    assert_eq!(
+        split_credentials("https://u:ab%+41cd@collector.example/v1").1,
+        Some(format!("Basic {}", base64(b"u:ab%+41cd")))
+    );
+}
+
 #[test]
 fn the_small_encoders_match_their_standards() {
     assert_eq!(base64(b""), "");
@@ -224,6 +234,14 @@ fn the_small_encoders_match_their_standards() {
         "https://***@collector.example/v1"
     );
     assert_eq!(mask_userinfo("not a url"), "not a url");
+    assert_eq!(
+        mask_userinfo("https://tok@collector.example/v1"),
+        "https://***@collector.example/v1"
+    );
+    assert_eq!(
+        mask_userinfo("https://:p@collector.example/v1"),
+        "https://***@collector.example/v1"
+    );
 }
 
 /// The credential split (moved with the exporter from busbar's composition root, K9e-2): whatever
