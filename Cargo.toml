@@ -10,7 +10,7 @@
 # `.busbar-ref`; no sibling-checkout path dependency ships in any manifest.
 #
 # THIRD-PARTY VERSIONS ARE THE FLEET'S, NOT THIS REPO'S. The table below is busbar's own root
-# `[workspace.dependencies]` (third-party rows) at busbar 934a016e20fc1a67c209b671d137c8cc28092767, followed by the plugin-only rows
+# `[workspace.dependencies]` (third-party rows) at busbar 86904c800d802a69f15371c4d6e407483b495215, followed by the plugin-only rows
 # of busbar's `.github/fleet/deps.toml` at 86904c800d802a69f15371c4d6e407483b495215. A member takes a crate with
 # `{ workspace = true }` (adding features if it needs them); a crate in neither table is a new
 # `deps.toml` row in busbar first. CI holds this repo's Cargo.lock to busbar's lock at the pin.
@@ -29,9 +29,9 @@ publish = false
 repository = "https://github.com/GetBusbar/busbar-export-otlp"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
-# busbar's root [workspace.dependencies], third-party rows, at 934a016e20fc1a67c209b671d137c8cc28092767
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "86904c800d802a69f15371c4d6e407483b495215" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "86904c800d802a69f15371c4d6e407483b495215" }
+# busbar's root [workspace.dependencies], third-party rows, at 86904c800d802a69f15371c4d6e407483b495215
 a2a-lf = "0.3.0"
 a2a-pb = "0.2.0"
 arc-swap = "1"
