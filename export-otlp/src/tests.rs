@@ -179,6 +179,11 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
         endpoint.shown,
         "https://***@collector.example:4318/v1/traces"
     );
+    // The collector the host dials carries no userinfo: the credential is only the header's.
+    assert_eq!(
+        endpoint.collector.as_deref(),
+        Some("https://collector.example:4318/v1/traces")
+    );
     let body = proto::export_request([&json!({"trace_id": "0000000000000001",
         "span_id": "0000000000000002", "name": "n", "start": 1, "duration_us": 1})])
     .expect("a span");

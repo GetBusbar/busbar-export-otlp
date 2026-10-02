@@ -12,8 +12,9 @@
 //! ([`proto`]): one resource (`service.name = busbar`), one scope (`busbar`), one span per record.
 //!
 //! **Who dials.** The HOST: the sink declares one outbound need ([`door::STATEMENT`]) — framed
-//! `http`, its target the instance's `settings.url`, under the `loopback-allowed` egress class
-//! (`https://`, or plaintext `http://` to a loopback collector only) — and a delivery is one
+//! `http`, its target the instance's `url` with the userinfo stripped, under the
+//! `loopback-allowed` egress class (`https://`, or plaintext `http://` to a loopback collector
+//! only) — and a delivery is one
 //! `exchange()` over it: `POST`, `content-type: application/x-protobuf`. The sink never dials.
 //! Credentials the operator embedded in the URL (`https://user:pass@collector/…`) never ride the
 //! request: they move into an `Authorization: Basic` header, and every line this sink writes masks

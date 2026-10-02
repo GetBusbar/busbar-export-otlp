@@ -40,14 +40,16 @@ use crate::{
 /// The one need's index in [`STATEMENT`]'s needs.
 pub const NEED: u32 = 0;
 
-/// The collector, reached through the host: framed `http`, at the instance's `settings.url`, under
-/// the `loopback-allowed` egress class 1.5.5's exporter held its endpoint to.
+/// The collector, reached through the host: framed `http`, under the `loopback-allowed` egress class
+/// 1.5.5's exporter held its endpoint to. The sink names the target itself — the operator's URL
+/// with its userinfo stripped ([`Endpoint::collector`]) — so no credential is ever part of what the
+/// host dials; the userinfo travels only as the request's `Authorization`.
 const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_LOOPBACK_ALLOWED,
     transport: abi_str("http"),
     auth: abi_str(""),
-    target_from: abi_str("settings.url"),
+    target_from: abi_str(""),
     trust_from: abi_str(""),
     details: Blob::ABSENT,
     keep_response_headers: std::ptr::null(),
@@ -82,6 +84,9 @@ pub const STATEMENT: Statement = Statement {
 pub struct Endpoint {
     /// The settings' URL, userinfo masked: what every line names.
     pub shown: String,
+    /// The collector the host dials — the settings' URL without its userinfo; `None` when the
+    /// settings did not parse.
+    pub collector: Option<String>,
     /// The request target (path and query) and the `Authorization` the userinfo became; `None`
     /// when the settings did not parse.
     pub target: Option<(String, Option<String>)>,
@@ -97,6 +102,7 @@ impl Endpoint {
                 Self {
                     shown: mask_userinfo(&s.url),
                     target: Some((request_target(&clean), authorization)),
+                    collector: Some(clean),
                 }
             }
             Err(_) => Self::default(),
@@ -257,7 +263,7 @@ impl SafeSlot for Deliver {
                 &mut host.connector(instance.ticket()),
                 &mut state,
                 NEED,
-                None,
+                endpoint.collector.as_deref(),
             ),
             None => Poll::Ready(Err(ConnFailure::Unarmed)),
         };

@@ -9,8 +9,9 @@
 //! `load_linked`) and DROPPED IN (this crate's built cdylib, `dlopen`ed by the loader's
 //! `load_dropped`, which resolves `busbar_plugin_door` and compares its Statement with the linked
 //! row's, byte for byte). Each is bound to a real dispatcher and to a stand-in for the host's
-//! connection table — a collector that judges each need's declared target under its egress class
-//! (`https://`, or plaintext to `127.0.0.1` under `loopback-allowed`; `*.internal.example` never)
+//! connection table — a collector that judges each target it is asked to dial under the need's
+//! egress class (`https://`, or plaintext to `127.0.0.1` under `loopback-allowed`;
+//! `*.internal.example` never)
 //! and answers 503 on a path ending `/fail`, 200 otherwise — and driven over one script: validate,
 //! open, the kind's answers, deliveries on request tickets (spans, a record that is no span), a
 //! failing collector, refused targets, a refresh that moves the target, close. Everything the host
@@ -88,15 +89,15 @@ fn row() -> LinkedRow {
 
 // ── the host's stand-ins ─────────────────────────────────────────────────────────────────────────
 
-/// One declared need: its target and the egress verdict on it.
-type Declared = (Option<String>, Result<(), ConnError>);
+/// One declared need: its egress class and the target it was declared at, if any.
+type Declared = (u32, Option<String>);
 
 /// The collector behind the host's connection table: what each need was declared at and judged,
 /// every request it was handed, and the reply each connection reads.
 #[derive(Default)]
 struct Collector {
     slab: ConnSlab<()>,
-    /// Per `(instance, need)`: the declared target and its verdict.
+    /// Per `(instance, need)`: its egress class and declared target.
     declared: Mutex<HashMap<(InstanceId, NeedId), Declared>>,
     carried: Mutex<Vec<Value>>,
     replies: Mutex<HashMap<ConnId, VecDeque<Piece>>>,
@@ -139,12 +140,11 @@ impl DeclaredConns for Collector {
         target: Option<&str>,
     ) -> Result<(), ConnError> {
         self.slab.declare(owner, need);
-        let verdict = judge(spec.egress_class, target);
         self.declared
             .lock()
             .unwrap()
-            .insert((owner, need), (target.map(String::from), verdict));
-        verdict
+            .insert((owner, need), (spec.egress_class, target.map(String::from)));
+        target.map_or(Ok(()), |t| judge(spec.egress_class, Some(t)))
     }
 
     fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
@@ -152,7 +152,7 @@ impl DeclaredConns for Collector {
             .lock()
             .unwrap()
             .get(&(owner, need))
-            .map(|d| d.1)
+            .map(|(class, target)| target.as_deref().map_or(Ok(()), |t| judge(*class, Some(t))))
     }
 
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
@@ -167,19 +167,20 @@ impl Conns for Collector {
         need: NeedId,
         desc: &OpenDesc<'_>,
     ) -> Result<ConnId, ConnError> {
-        let (target, verdict) = self
+        let (class, declared) = self
             .declared
             .lock()
             .unwrap()
             .get(&(caller, need))
             .cloned()
             .ok_or(ConnError::UndeclaredNeed)?;
-        verdict?;
+        // The target the plugin named at establish, else the one the need was declared at.
         let target = if desc.target.is_empty() {
-            target.unwrap_or_default()
+            declared.unwrap_or_default()
         } else {
             desc.target.to_owned()
         };
+        judge(class, Some(&target))?;
         self.carried.lock().unwrap().push(json!({
             "need": need.0,
             "target": target,
@@ -584,12 +585,16 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
             ("http://127.0.0.1:4318/v1/traces", "/v1/traces"),
             ("http://127.0.0.1:4318/v1/traces", "/v1/traces"),
             ("http://127.0.0.1:4318/v2/traces", "/v2/traces"),
-            ("https://u:p@collector.example/fail", "/fail"),
-            ("https://u:p@collector.example/fail", "/fail"),
+            ("https://collector.example/fail", "/fail"),
+            ("https://collector.example/fail", "/fail"),
         ]
         .map(|(a, b)| (a.to_owned(), b.to_owned()))
     );
     for c in carried {
+        assert!(
+            !c["target"].as_str().unwrap().contains('@'),
+            "the target the host dials carries no userinfo: {c}"
+        );
         assert_eq!(c["need"], 0);
         assert_eq!(c["method"], "POST");
         assert_eq!(c["timeout_ms"], 10_000);
