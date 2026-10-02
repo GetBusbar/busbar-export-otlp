@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! ONE `traces` RECORD → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
+//! ONE `traces` BATCH → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
 //! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded here by hand:
 //! the handful of messages it takes do not justify a code generator in the binary.
 //!
 //! The request is `resource_spans[1]`: `resource.attributes = [service.name = "busbar"]`, one
-//! `scope_spans` whose `scope.name` is `busbar`, and one `Span`:
+//! `scope_spans` whose `scope.name` is `busbar`, and one `Span` per record, in batch order:
 //!
 //! | record field | `Span` field |
 //! |---|---|
@@ -21,7 +21,7 @@
 //!
 //! Proto3 rules, as every conforming encoder writes them: fields in field-number order, a field at
 //! its default (empty, zero) left off, a `oneof` member written whenever it is set. A record with no
-//! usable `trace_id` or `span_id` is no span and encodes to nothing.
+//! usable `trace_id` or `span_id` is no span; a batch with no span encodes to nothing.
 
 use serde_json::Value;
 
@@ -37,15 +37,21 @@ const VARINT: u32 = 0;
 const FIXED64: u32 = 1;
 const LEN: u32 = 2;
 
-/// The encoded `ExportTraceServiceRequest` carrying `record` as its one span, or `None` when the
-/// record carries no usable span identity.
-pub fn export_request(record: &Value) -> Option<Vec<u8>> {
-    let span = span(record)?;
+/// The encoded `ExportTraceServiceRequest` carrying each of `records` that is a span, in order, or
+/// `None` when none of them carries a usable span identity.
+pub fn export_request<'a>(records: impl IntoIterator<Item = &'a Value>) -> Option<Vec<u8>> {
     let mut scope = Vec::new();
     string(&mut scope, 1, SERVICE);
     let mut scope_spans = Vec::new();
     message(&mut scope_spans, 1, &scope);
-    message(&mut scope_spans, 2, &span);
+    let mut spans = 0usize;
+    for span in records.into_iter().filter_map(span) {
+        message(&mut scope_spans, 2, &span);
+        spans += 1;
+    }
+    if spans == 0 {
+        return None;
+    }
     let mut resource = Vec::new();
     message(&mut resource, 1, &key_value("service.name", SERVICE));
     let mut resource_spans = Vec::new();
@@ -54,6 +60,11 @@ pub fn export_request(record: &Value) -> Option<Vec<u8>> {
     let mut request = Vec::new();
     message(&mut request, 1, &resource_spans);
     Some(request)
+}
+
+/// Whether `record` carries a usable span identity (it is a span [`export_request`] encodes).
+pub fn is_span(record: &Value) -> bool {
+    span(record).is_some()
 }
 
 /// The record's `Span` message.

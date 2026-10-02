@@ -2,10 +2,13 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The sink's own suite: the OTLP encoding (checked against the OpenTelemetry project's generated
-//! types), the settings and check refusals, and the host ops each call asks for. The same crate
-//! through both doors is proven by `busbar-export-otlp-plugin`'s conformance test.
+//! types), the settings refusals, and the request each delivery sends. The same crate through both
+//! doors is proven by `busbar-export-otlp-plugin`'s conformance test.
 
 use super::*;
+use busbar_contract::abi::sdk::exchange::Request;
+use busbar_contract::abi::sdk::life::Life;
+use door::{Endpoint, Otlp};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
@@ -63,7 +66,7 @@ fn a_traces_record_is_one_otlp_span_every_field_in_its_place() {
         "pool": "p1", "ingress": "openai", "op": "chat", "lane": "l0",
         "provider": "mock", "model": "m1",
     });
-    let bytes = proto::export_request(&record).expect("a span");
+    let bytes = proto::export_request([&record]).expect("a span");
     let mut trace_id = vec![0u8; 15];
     trace_id.push(0x2a);
     let span = Span {
@@ -95,7 +98,7 @@ fn a_root_span_has_no_parent_and_only_its_own_attributes() {
         "trace_id": "0000000000000007", "span_id": "0000000000000007", "name": "forward",
         "start": 5, "duration_us": 0, "pool": "", "op": "chat",
     });
-    let bytes = proto::export_request(&record).expect("a span");
+    let bytes = proto::export_request([&record]).expect("a span");
     let request = decoded(&bytes);
     let span = &request.resource_spans[0].scope_spans[0].spans[0];
     assert!(span.parent_span_id.is_empty());
@@ -117,93 +120,98 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
         json!({"trace_id": "00000000000000001", "span_id": "0000000000000001"}),
         json!({"trace_id": 1, "span_id": "0000000000000001"}),
     ] {
-        assert_eq!(proto::export_request(&record), None, "{record}");
+        assert_eq!(proto::export_request([&record]), None, "{record}");
     }
+}
+
+/// A batch is ONE request: each record that is a span, in batch order; a record that is none adds
+/// nothing.
+#[test]
+fn a_batch_is_one_request_carrying_each_span_in_order() {
+    let records = [
+        json!({"trace_id": "0000000000000001", "span_id": "0000000000000002", "name": "a"}),
+        json!({"name": "no identity"}),
+        json!({"trace_id": "0000000000000001", "span_id": "0000000000000003", "name": "b"}),
+    ];
+    let request = decoded(&proto::export_request(&records).expect("two spans"));
+    let spans = &request.resource_spans[0].scope_spans[0].spans;
+    let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["a", "b"]);
+    assert!(!proto::is_span(&records[1]));
+    // One record encodes exactly as a batch of one.
+    assert_eq!(
+        proto::export_request([&records[0]]),
+        proto::export_request(&records[..1])
+    );
 }
 
 /// The settings' shape refuses in the configuration grammar's words.
 #[test]
 fn settings_refuse_in_the_grammars_words() {
-    let sink = open("{}").expect("opens");
-    assert!(sink
-        .validate("t", &json!({"url": "http://localhost:4318/v1/traces"}))
-        .is_empty());
+    let refusal = |s: &str| {
+        Otlp::validate(s.as_bytes())
+            .err()
+            .map(|r| r.text().map(String::from))
+    };
     assert_eq!(
-        sink.validate("t", &json!({"url": "http://x/", "otlp_endpoint": "y"})),
-        vec!["export.t.settings: unknown field `otlp_endpoint`, expected `url`".to_string()]
+        refusal(r#"{"url": "http://localhost:4318/v1/traces"}"#),
+        None
     );
     assert_eq!(
-        sink.validate("t", &json!({})),
-        vec!["export.t.settings: missing field `url`".to_string()]
+        refusal(r#"{"url": "http://x/", "otlp_endpoint": "y"}"#),
+        Some(Some(
+            "settings: unknown field `otlp_endpoint`, expected `url`".to_string()
+        ))
+    );
+    assert_eq!(
+        refusal("{}"),
+        Some(Some("settings: missing field `url`".to_string()))
     );
 }
 
-/// Start asks the host's policy about the endpoint AS WRITTEN (its refusal names it masked); the
-/// answer decides whether the sink takes spans this run.
+/// A delivery POSTs the batch's OTLP request — binary, to the endpoint's path, the userinfo riding
+/// as `Authorization: Basic` instead; every line names the endpoint masked.
 #[test]
-fn start_asks_the_policy_and_its_answer_decides() {
-    let sink = open(r#"{"url":"https://u:p@collector.example/v1/traces"}"#).expect("opens");
+fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
+    let endpoint =
+        Endpoint::of(br#"{"url":"https://us%40r:p%3Ass@collector.example:4318/v1/traces"}"#);
     assert_eq!(
-        sink.start(),
-        HostStep::Host {
-            token: 0,
-            ops: vec![HostOp::Admit {
-                url: "https://u:p@collector.example/v1/traces".into()
-            }],
-        }
+        endpoint.shown,
+        "https://***@collector.example:4318/v1/traces"
     );
+    let body = proto::export_request([&json!({"trace_id": "0000000000000001",
+        "span_id": "0000000000000002", "name": "n", "start": 1, "duration_us": 1})])
+    .expect("a span");
     assert_eq!(
-        sink.resume(0, vec![HostResult::Done { rotation: None }]),
-        started(true)
-    );
-    let refused = HostResult::Failed {
-        step: "refused".into(),
-        error: "no".into(),
-        rotation: None,
-    };
-    assert_eq!(sink.resume(0, vec![refused]), started(false));
-    // Settings that did not parse (the configuration refused them) take nothing.
-    assert_eq!(open("{}").expect("opens").start(), started(false));
-}
-
-/// A delivery asks the host to POST the span's OTLP request — binary, to the endpoint without its
-/// userinfo, which rides as `Authorization: Basic` instead.
-#[test]
-fn a_delivery_asks_the_host_to_post_the_request_with_the_credential_moved_to_a_header() {
-    let sink =
-        open(r#"{"url":"https://us%40r:p%3Ass@collector.example:4318/v1/traces"}"#).expect("opens");
-    let record = json!({"trace_id": "0000000000000001", "span_id": "0000000000000002",
-        "name": "n", "start": 1, "duration_us": 1});
-    let HostStep::Host { token, ops } = sink.deliver_via_host(ExportStream::Traces, &record) else {
-        panic!("a delivery asks the host to act");
-    };
-    assert_eq!(token, 1);
-    assert_eq!(
-        ops,
-        vec![HostOp::HttpBinary(HttpRequest {
-            method: "POST".into(),
-            url: "https://collector.example:4318/v1/traces".into(),
-            headers: vec![
-                ("content-type".into(), "application/x-protobuf".into()),
+        endpoint.request(body.clone()),
+        Some(Request {
+            method: b"POST".to_vec(),
+            target: b"/v1/traces".to_vec(),
+            fields: vec![
+                (b"content-type".to_vec(), b"application/x-protobuf".to_vec()),
                 // base64("us@r:p:ss")
-                ("authorization".into(), "Basic dXNAcjpwOnNz".into()),
+                (b"authorization".to_vec(), b"Basic dXNAcjpwOnNz".to_vec()),
             ],
-            body: hex(&proto::export_request(&record).expect("a span")),
+            body,
             timeout_ms: 10_000,
-        })]
+        })
     );
-    // The answer: fire and forget, whatever it was.
-    let failed = HostResult::Failed {
-        step: "request".into(),
-        error: "reset".into(),
-        rotation: None,
-    };
-    assert_eq!(sink.resume(token, vec![failed]), HostStep::Done);
-    // A record that is no span asks nothing.
-    assert_eq!(
-        sink.deliver_via_host(ExportStream::Traces, &json!({"name": "x"})),
-        HostStep::Done
-    );
+    // Settings that did not parse (the configuration refused them) send nothing.
+    assert_eq!(Endpoint::of(b"{}").request(vec![1]), None);
+    assert_eq!(Endpoint::of(b"").request(vec![1]), None);
+}
+
+/// The request target is the endpoint's path and query.
+#[test]
+fn the_request_target_is_the_path_and_query() {
+    for (endpoint, target) in [
+        ("http://127.0.0.1:4318/v1/traces", "/v1/traces"),
+        ("https://h/v1/traces?tenant=a", "/v1/traces?tenant=a"),
+        ("http://localhost:4318", "/"),
+        ("not a url", "/"),
+    ] {
+        assert_eq!(request_target(endpoint), target, "{endpoint}");
+    }
 }
 
 /// EOTLP-1: `from_str_radix` accepts a leading `+`, so `%+4` must stay literal (1.5.5 bytes).
@@ -223,7 +231,6 @@ fn the_small_encoders_match_their_standards() {
     assert_eq!(base64(b"fo"), "Zm8=");
     assert_eq!(base64(b"foo"), "Zm9v");
     assert_eq!(base64(b"user:pass"), "dXNlcjpwYXNz");
-    assert_eq!(hex(&[0x00, 0x0a, 0xff]), "000aff");
     assert_eq!(percent_decode("a%20b%zz%4"), "a b%zz%4");
     assert_eq!(
         split_credentials("http://localhost:4318/v1/traces"),

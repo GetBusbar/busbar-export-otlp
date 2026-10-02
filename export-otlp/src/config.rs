@@ -16,3 +16,14 @@ pub struct OtlpSettings {
     /// `otlp` export instance is present busbar exports its spans there.
     pub url: String,
 }
+
+impl OtlpSettings {
+    /// The settings `bytes` hold, refused in the configuration grammar's words (`unknown field …`,
+    /// `missing field `url``), as 1.5.x read them from the configuration's own value.
+    ///
+    /// # Errors
+    /// The bytes are not JSON, or not this shape.
+    pub fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(serde_json::from_slice(bytes)?)
+    }
+}

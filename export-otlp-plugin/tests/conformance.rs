@@ -1,202 +1,381 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **THE OTLP TRACE SINK, BOTH WAYS** — the sink's linked + dropped-in conformance, run against the
-//! busbar rev this repo pins (`.busbar-ref`).
+//! **THE OTLP TRACE SINK, BOTH DOORS, ONE TABLE** — the sink's linked + dropped-in conformance on
+//! the export kind's memory ABI (THE DESIGN §11.4), run against the busbar rev this repo pins
+//! (`.busbar-ref`).
 //!
-//! The sink is held two ways at once: LINKED (its `linked::EXPORT` statement and boundary, the row a
-//! busbar build that compiles it in registers) and DROPPED IN (this crate's built cdylib, signed
-//! first-party under the SAME statement — `declares` included, which is what
-//! `busbar-plugin-pack --declares-file` embeds — into a temp `plugins/` directory and found by the
-//! loader's scan). Each is registered through the plugin registry's one admission and opened through
-//! its one `open_export`. One script runs against each: validate and check its settings, start it
-//! (the host's collector policy asked of its target), deliver two spans (one the collector accepts,
-//! one it answers 503) and a record that is no span. Everything the host sees — the answers, the
-//! egress policy each request was judged under, and every request its carrier was asked to make,
-//! octets included — must be byte-identical between the doors, and every body the collector was
-//! handed must be an OTLP `ExportTraceServiceRequest` by the OpenTelemetry project's own types,
+//! The sink is held two ways at once: LINKED (the logic crate's `door::door`, through the loader's
+//! `load_linked`) and DROPPED IN (this crate's built cdylib, `dlopen`ed by the loader's
+//! `load_dropped`, which resolves `busbar_plugin_door` and compares its Statement with the linked
+//! row's, byte for byte). Each is bound to a real dispatcher and to a stand-in for the host's
+//! connection table — a collector that judges each need's declared target under its egress class
+//! (`https://`, or plaintext to `127.0.0.1` under `loopback-allowed`; `*.internal.example` never)
+//! and answers 503 on a path ending `/fail`, 200 otherwise — and driven over one script: validate,
+//! open, the kind's answers, deliveries on request tickets (spans, a record that is no span), a
+//! failing collector, refused targets, a refresh that moves the target, close. Everything the host
+//! sees — the answers, every request the connector was handed (octets included) and every line the
+//! sink logged through the door's call capture — must be identical between the doors, and every
+//! body must be an OTLP `ExportTraceServiceRequest` by the OpenTelemetry project's own types,
 //! re-encoding to the same bytes.
 //!
-//! RED ARMS: a tarball packed WITHOUT the declaration the linked row states is judged under the open
-//! web, which refuses a plaintext loopback collector, so it never starts and nothing is carried; the
-//! declaration signed by a third party is refused at open, naming the policy; and without the linked
-//! row the module is not on the axis at all.
+//! THE RED ARMS, same file: the door asked for as another kind is refused, by either origin; a
+//! manifest stating 1.5.5's export ABI (2) is refused before `dlopen`; a refused target carries
+//! nothing and disables the run, saying so; the same image over another config answers another
+//! transcript. A missing cdylib PANICS — this test IS the dropped-in door's proof, and never skips.
 
-use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
-use busbar_plugin_loader::{
-    EgressPolicy, ExportStream, HostResult, HttpRequest, HttpResponse, LinkedPlugin, PluginRegistry,
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use busbar_contract::abi::export::{
+    self, CheckIn, CheckOut, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn, ServeOut,
+    StatusOut,
+};
+use busbar_contract::abi::host::conn::connector::EGRESS_LOOPBACK_ALLOWED;
+use busbar_contract::abi::mechanism::call::{
+    Blob, DeadlineClass, InHead, OutHead, BLOB_JSON, BLOB_JSONL, DIAG_LOG,
+};
+use busbar_contract::abi::mechanism::lifecycle::{
+    slot as lc, OpenIn, OpenOut, RefreshIn, ValidateIn,
+};
+use busbar_contract::abi::mechanism::rendering::{ReadNeed, RENDERING_MAGIC};
+use busbar_contract::abi::sdk::door::{blank_in, blank_out};
+use busbar_contract::conn::{
+    ConnError, ConnId, ConnSlab, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc, Piece,
+    PieceKind,
+};
+use busbar_contract::ids::StreamId;
+use busbar_contract::transport::ConnFacts;
+use busbar_plugin_loader::dispatch::kinds::export::Export;
+use busbar_plugin_loader::dispatch::kinds::secret::Secret;
+use busbar_plugin_loader::dispatch::{
+    in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, Diagnostic, DispatchConfig,
+    Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin, NO_BLOB,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use prost::Message as _;
 use serde_json::{json, Value};
-use std::sync::Mutex;
 
-const ALIAS: &str = "otlp";
-
-/// The version both arms state (a linked row states its binary's version; here, this crate's).
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The requests the host's carrier was asked to make during one script.
-static CARRIED: Mutex<Vec<Value>> = Mutex::new(Vec::new());
-/// One script at a time (the carrier is process-global).
-static SERIAL: Mutex<()> = Mutex::new(());
-
-/// The egress this test installs. Its OPEN-WEB policy takes `https://` only; its COLLECTOR policy
-/// also takes plaintext `http://` to `127.0.0.1`, and refuses `*.internal.example` under either.
-/// The far end answers 503 on a path ending `/fail` and 200 otherwise. It records every request it
-/// carries, with the policy it was judged under and its octets.
-struct Carrier;
-
-fn judge(policy: EgressPolicy, url: &str) -> Result<(), String> {
-    let loopback_http = url.starts_with("http://127.0.0.1");
-    match (policy, url) {
-        (_, u) if u.contains(".internal.example") => Err(format!("refused target '{u}'")),
-        (_, u) if u.starts_with("https://") => Ok(()),
-        (EgressPolicy::Collector, _) if loopback_http => Ok(()),
-        (_, u) => Err(format!("plaintext target '{u}' refused")),
-    }
-}
-
-impl busbar_plugin_loader::EgressCarrier for Carrier {
-    fn carry(&self, request: &HttpRequest) -> HostResult {
-        self.carry_under(EgressPolicy::OpenWeb, request, request.body.as_bytes())
-    }
-
-    fn admit(&self, url: &str) -> Result<(), String> {
-        judge(EgressPolicy::OpenWeb, url)
-    }
-
-    fn admit_under(&self, policy: EgressPolicy, url: &str) -> Result<(), String> {
-        judge(policy, url)
-    }
-
-    fn carry_under(&self, policy: EgressPolicy, request: &HttpRequest, body: &[u8]) -> HostResult {
-        if let Err(refusal) = judge(policy, &request.url) {
-            return HostResult::Failed {
-                step: "refused".into(),
-                error: refusal,
-                rotation: None,
-            };
-        }
-        CARRIED.lock().unwrap().push(json!({
-            "policy": policy.as_token(),
-            "method": request.method,
-            "url": request.url,
-            "headers": request.headers,
-            "timeout_ms": request.timeout_ms,
-            "body": busbar_export_otlp::hex(body),
-        }));
-        let status = if request.url.ends_with("/fail") {
-            503
-        } else {
-            200
-        };
-        HostResult::Http(HttpResponse {
-            status,
-            body: String::new(),
-        })
-    }
-}
-
-fn installed() -> std::sync::MutexGuard<'static, ()> {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // First-install-wins process global: if another test in this binary had installed its own,
-        // every assertion below would read somebody else's record — refuse that loudly.
-        assert!(busbar_plugin_loader::install_egress_carrier(&Carrier));
-    });
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
+const COLLECTOR: &str = r#"{"url":"http://127.0.0.1:4318/v1/traces"}"#;
+const FAILING: &str = r#"{"url":"https://u:p@collector.example/fail"}"#;
+const INTERNAL: &str = r#"{"url":"https://collector.internal.example/v1/traces"}"#;
+const PLAINTEXT: &str = r#"{"url":"http://collector.example/v1/traces"}"#;
+const MOVED: &str = r#"{"url":"http://127.0.0.1:4318/v2/traces"}"#;
 
 /// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-/// failure, never a skip: this test IS the dropped-in door's proof.
-fn cdylib() -> Vec<u8> {
+/// failure, never a skip.
+fn cdylib() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary has a path");
     let profile = exe
         .parent()
         .and_then(|d| d.parent())
         .expect("target/<profile>");
     let file = busbar_plugin_loader::plugin_library_filename("busbar_export_otlp_plugin");
-    let found = [profile.join(&file), profile.join("deps").join(&file)]
+    [profile.join(&file), profile.join("deps").join(&file)]
         .into_iter()
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .max()
         .map(|(_, p)| p)
-        .unwrap_or_else(|| panic!("the busbar-export-otlp-plugin cdylib ({file}) is not built"));
-    std::fs::read(found).expect("read the cdylib")
+        .unwrap_or_else(|| panic!("the busbar-export-otlp-plugin cdylib ({file}) is not built"))
 }
 
-/// THE LINKED DOOR: exactly the row busbar's composition root states for `linked::EXPORT`.
-fn linked_door() -> PluginRegistry {
-    let (name, alias, declares, entry) = busbar_export_otlp::linked::EXPORT;
-    let abi = busbar_plugin_loader::supported_abi("export")
-        .iter()
-        .copied()
-        .max()
+/// The row a busbar build that links the sink states.
+fn row() -> LinkedRow {
+    LinkedRow::of(busbar_export_otlp::door::door).expect("the linked door renders")
+}
+
+// ── the host's stand-ins ─────────────────────────────────────────────────────────────────────────
+
+/// One declared need: its target and the egress verdict on it.
+type Declared = (Option<String>, Result<(), ConnError>);
+
+/// The collector behind the host's connection table: what each need was declared at and judged,
+/// every request it was handed, and the reply each connection reads.
+#[derive(Default)]
+struct Collector {
+    slab: ConnSlab<()>,
+    /// Per `(instance, need)`: the declared target and its verdict.
+    declared: Mutex<HashMap<(InstanceId, NeedId), Declared>>,
+    carried: Mutex<Vec<Value>>,
+    replies: Mutex<HashMap<ConnId, VecDeque<Piece>>>,
+}
+
+/// The egress verdict on `target` under `class`.
+fn judge(class: u32, target: Option<&str>) -> Result<(), ConnError> {
+    match target {
+        Some(u) if u.contains(".internal.example") => Err(ConnError::Refused),
+        Some(u) if u.starts_with("https://") => Ok(()),
+        Some(u) if class == EGRESS_LOOPBACK_ALLOWED && u.starts_with("http://127.0.0.1") => Ok(()),
+        _ => Err(ConnError::Refused),
+    }
+}
+
+fn piece(kind: PieceKind, code: Option<u32>) -> Piece {
+    Piece {
+        kind,
+        stream: StreamId(0),
+        len: 0,
+        end: true,
+        status: None,
+        status_code: code,
+        status_namespace: None,
+        retry_after_secs: None,
+        reason: None,
+    }
+}
+
+fn hex(octets: &[u8]) -> String {
+    octets.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl DeclaredConns for Collector {
+    fn declare(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        spec: &ReadNeed,
+        target: Option<&str>,
+    ) -> Result<(), ConnError> {
+        self.slab.declare(owner, need);
+        let verdict = judge(spec.egress_class, target);
+        self.declared
+            .lock()
+            .unwrap()
+            .insert((owner, need), (target.map(String::from), verdict));
+        verdict
+    }
+
+    fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+        self.declared
+            .lock()
+            .unwrap()
+            .get(&(owner, need))
+            .map(|d| d.1)
+    }
+
+    fn framed(&self, _: InstanceId, _: NeedId) -> bool {
+        true
+    }
+}
+
+impl Conns for Collector {
+    fn open(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+    ) -> Result<ConnId, ConnError> {
+        let (target, verdict) = self
+            .declared
+            .lock()
+            .unwrap()
+            .get(&(caller, need))
+            .cloned()
+            .ok_or(ConnError::UndeclaredNeed)?;
+        verdict?;
+        let target = if desc.target.is_empty() {
+            target.unwrap_or_default()
+        } else {
+            desc.target.to_owned()
+        };
+        self.carried.lock().unwrap().push(json!({
+            "need": need.0,
+            "target": target,
+            "method": String::from_utf8_lossy(desc.method),
+            "head_target": String::from_utf8_lossy(desc.head_target),
+            "fields": desc.fields.iter()
+                .map(|(n, v)| [(*n).to_owned(), String::from_utf8_lossy(v).into_owned()])
+                .collect::<Vec<_>>(),
+            "timeout_ms": desc.timeout_ms,
+            "body": hex(desc.body),
+        }));
+        let id = self.slab.insert(caller, need, ())?;
+        let code = if desc.head_target.ends_with(b"/fail") {
+            503
+        } else {
+            200
+        };
+        self.replies.lock().unwrap().insert(
+            id,
+            VecDeque::from([
+                piece(PieceKind::Fields, Some(code)),
+                piece(PieceKind::Completion, None),
+            ]),
+        );
+        Ok(id)
+    }
+
+    fn write(&self, c: InstanceId, id: ConnId, b: &[u8], _: bool) -> Result<usize, ConnError> {
+        self.slab.get(c, id)?;
+        Ok(b.len())
+    }
+
+    fn read(&self, c: InstanceId, id: ConnId, _: u64, _: &mut [u8]) -> Result<Piece, ConnError> {
+        self.slab.get(c, id)?;
+        self.replies
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .and_then(VecDeque::pop_front)
+            .ok_or(ConnError::Closed)
+    }
+
+    fn wait(&self, _: InstanceId, _: &[ConnId], _: u64) -> Result<usize, ConnError> {
+        Err(ConnError::Pending)
+    }
+
+    fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
+        Err(ConnError::Closed)
+    }
+
+    fn close(&self, c: InstanceId, id: ConnId) -> Result<(), ConnError> {
+        self.replies.lock().unwrap().remove(&id);
+        self.slab.remove(c, id).map(|_| ())
+    }
+}
+
+/// The instance's log, as the host receives it: every log record of every reply's envelope.
+#[derive(Default)]
+struct Lines(Mutex<Vec<String>>);
+
+impl EnvelopeSink for Lines {
+    fn metric(&self, _: Metric<'_>) {}
+    fn diag(&self, d: Diagnostic<'_>) {
+        if d.id == DIAG_LOG {
+            let text = String::from_utf8_lossy(d.text);
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{} {text}", d.severity));
+        }
+    }
+    fn dropped(&self, why: Dropped) {
+        self.0.lock().unwrap().push(format!("dropped {why:?}"));
+    }
+}
+
+/// One door's host: its dispatcher, collector and log.
+struct Host {
+    d: Arc<Dispatcher>,
+    collector: Arc<Collector>,
+    lines: Arc<Lines>,
+}
+
+impl Host {
+    fn new() -> Self {
+        Self {
+            d: Arc::new(Dispatcher::new(DispatchConfig {
+                workers: 2,
+                watchdog_period: Duration::from_millis(20),
+                ..DispatchConfig::default()
+            })),
+            collector: Arc::default(),
+            lines: Arc::default(),
+        }
+    }
+
+    fn bind(&self) -> Bind {
+        let conns: Arc<dyn DeclaredConns> = self.collector.clone();
+        let sink: Arc<dyn EnvelopeSink> = self.lines.clone();
+        Bind {
+            instance: Arc::from("traces"),
+            max_inflight_cap: 64,
+            sink,
+            dispatcher: self.d.adopter(),
+            conns: Some(conns),
+        }
+    }
+}
+
+/// The door, linked or dropped in, bound to `host`.
+fn load(host: &Host, dropped: bool) -> Plugin<Export> {
+    if dropped {
+        load_dropped::<Export>(&cdylib(), &row().statement, host.bind())
+            .expect("the dropped-in door loads")
+    } else {
+        load_linked::<Export>(&row(), host.bind()).expect("the linked door loads")
+    }
+}
+
+// ── the script ───────────────────────────────────────────────────────────────────────────────────
+
+fn blob(bytes: &[u8], fmt: u32) -> Blob {
+    Blob {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+        fmt,
+        flags: 0,
+    }
+}
+
+fn spelled(c: &Called) -> String {
+    let text = c
+        .error
+        .as_deref()
+        .map(String::from_utf8_lossy)
         .unwrap_or_default();
-    let manifest = Manifest {
-        name: name.into(),
-        alias: alias.into(),
-        kind: "export".into(),
-        version: VERSION.into(),
-        publisher: busbar_plugin_loader::sign::FIRST_PARTY_PUBLISHER.into(),
-        abi_version: abi,
-        sha256: String::new(),
-        signature: String::new(),
-        description: String::new(),
-        homepage: String::new(),
-        license: String::new(),
-        needs: Default::default(),
-        settings_schema: None,
-        schema_derived: false,
-        host: None,
-        declares: serde_json::from_str(declares).expect("declares.json parses"),
-    };
-    PluginRegistry::empty()
-        .link(vec![LinkedPlugin::boundary(manifest, entry)])
-        .expect("the linked door admits it")
+    format!("{:?} {text}", c.outcome)
 }
 
-/// The statement the linked row makes for `ALIAS` — what the tarball must state too.
-fn statement(registry: &PluginRegistry) -> Manifest {
-    registry
-        .resolve(ALIAS)
-        .expect("the otlp row")
-        .manifest
-        .clone()
+fn validate(p: &Plugin<Export>, settings: &str) -> String {
+    let mut input: ValidateIn = blank_in();
+    input.head = in_head();
+    input.settings = blob(settings.as_bytes(), BLOB_JSON);
+    spelled(&p.call(lc::VALIDATE, &mut Frame::new(input, out_head())))
 }
 
-/// THE DROPPED-IN DOOR: `lib` signed by `key` under `manifest` into a fresh `plugins/`, scanned
-/// under a policy whose first-party key is the release key (`[9; 32]`) and that admits the
-/// third-party key (`[5; 32]`) as publisher `acme`.
-fn dropped_door(tag: &str, mut manifest: Manifest, lib: &[u8], key: [u8; 32]) -> PluginRegistry {
-    let dir = std::env::temp_dir().join(format!("export-otlp-conf-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let release = SigningKey::from_bytes(&[9u8; 32]);
-    let signer = SigningKey::from_bytes(&key);
-    manifest.sha256 = busbar_plugin_loader::sign::sha256_hex(lib);
-    let signed = sign(&signer, manifest, lib);
-    let tarball = busbar_plugin_loader::tarball::package(&signed, "libotlp.so", lib).unwrap();
-    std::fs::write(dir.join("otlp.tar.gz"), tarball).unwrap();
-    let policy = TrustPolicy {
-        first_party_key: Some(release.verifying_key()),
-        binary_version: VERSION.into(),
-        first_party_floors: Default::default(),
-        first_party_high_water: Default::default(),
-        publishers: [(
-            "acme".to_string(),
-            SigningKey::from_bytes(&[5u8; 32]).verifying_key(),
-        )]
-        .into_iter()
-        .collect(),
-        allow_unsigned: false,
-        allow_third_party: true,
-        min_versions: Default::default(),
+fn open(p: &Plugin<Export>, settings: &str) -> String {
+    let mut input: OpenIn = blank_in();
+    input.head = in_head();
+    input.settings = blob(settings.as_bytes(), BLOB_JSON);
+    input.generation = 1;
+    let mut out: OpenOut = blank_out();
+    out.head = out_head();
+    spelled(&p.call(lc::OPEN, &mut Frame::new(input, out)))
+}
+
+fn refresh(p: &Plugin<Export>, settings: &str) -> String {
+    let mut input: RefreshIn = blank_in();
+    input.head = in_head();
+    input.settings = blob(settings.as_bytes(), BLOB_JSON);
+    input.generation = 2;
+    spelled(&p.call(lc::REFRESH, &mut Frame::new(input, out_head())))
+}
+
+fn close(p: &Plugin<Export>) -> String {
+    let mut f: Frame<InHead, OutHead> = Frame::new(in_head(), out_head());
+    spelled(&p.call(lc::CLOSE, &mut f))
+}
+
+/// The kind's four non-delivery answers.
+fn kind_answers(p: &Plugin<Export>) -> Value {
+    let mut scrape: ScrapeIn = blank_in();
+    scrape.head = in_head();
+    let mut scrape_out: ScrapeOut = blank_out();
+    scrape_out.head = out_head();
+    let status = StatusOut {
+        head: out_head(),
+        status: NO_BLOB,
     };
-    let registry = busbar_plugin_loader::scan_and_validate(&dir, &policy).expect("the scan");
-    let _ = std::fs::remove_dir_all(&dir);
-    registry
+    let mut check: CheckIn = blank_in();
+    check.head = in_head();
+    check.phase = export::CHECK_PHASE_INSTANCES;
+    let check_out = CheckOut {
+        head: out_head(),
+        findings: NO_BLOB,
+    };
+    let mut serve: ServeIn = blank_in();
+    serve.head = in_head();
+    let mut serve_out: ServeOut = blank_out();
+    serve_out.head = out_head();
+    json!({
+        "scrape": spelled(&p.call(export::slot::SCRAPE, &mut Frame::new(scrape, scrape_out))),
+        "status": spelled(&p.call(export::slot::STATUS, &mut Frame::new(in_head(), status))),
+        "check": spelled(&p.call(export::slot::CHECK, &mut Frame::new(check, check_out))),
+        "serve": spelled(&p.call(export::slot::SERVE, &mut Frame::new(serve, serve_out))),
+    })
 }
 
 /// A `traces` record as the host's producer builds it.
@@ -212,52 +391,120 @@ fn record(span: &str, parent: Option<&str>) -> Value {
     r
 }
 
-/// One script against the `otlp` row of `registry`: everything the host saw.
-fn transcript(registry: &PluginRegistry) -> Value {
-    CARRIED.lock().unwrap().clear();
-    let collector = json!({"url": "http://127.0.0.1:4318/v1/traces"});
-    let refused = json!({"url": "https://collector.internal.example/v1/traces"});
-    let failing = json!({"url": "https://u:p@collector.example/fail"});
-    let validated = (
-        registry.validate_export(ALIAS, "t", &json!({"url": "http://x/", "otlp_endpoint": 1})),
-        registry.check_export(
-            ALIAS,
-            busbar_plugin_loader::CheckPhase::Instances,
+/// `records` as the JSON-lines batch the host hands `deliver`.
+fn jsonl(records: &[Value]) -> Vec<u8> {
+    records
+        .iter()
+        .map(|r| format!("{r}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// `deliver` of `records` on a request ticket, as the host's delivery runs it.
+fn deliver(host: &Host, p: &Plugin<Export>, records: &[Value]) -> String {
+    let batch = jsonl(records);
+    let mut input: DeliverIn = blank_in();
+    input.head = in_head();
+    input.stream = ExportStream::Traces as u8;
+    input.batch = blob(&batch, BLOB_JSONL);
+    let ticket = host.d.mint(0).expect("a ticket");
+    let reply = host.d.submit(
+        p,
+        ticket,
+        export::slot::DELIVER,
+        Frame::new(input, out_head()),
+        DeadlineClass::WriteBehind,
+        now_ns() + 10_000_000_000,
+    );
+    let done = reply
+        .wait(Duration::from_secs(10))
+        .expect("the delivery completes");
+    host.d.recycle(ticket);
+    drop(batch);
+    let text = done
+        .error
+        .as_deref()
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default();
+    format!("{:?} {text}", done.outcome)
+}
+
+/// `deliver` with no ticket: it may not pend, so the connector is not reachable.
+fn deliver_ticketless(p: &Plugin<Export>) -> String {
+    let batch = jsonl(&[record("0000000000000019", None)]);
+    let mut input: DeliverIn = blank_in();
+    input.head = in_head();
+    input.stream = ExportStream::Traces as u8;
+    input.batch = blob(&batch, BLOB_JSONL);
+    spelled(&p.call(export::slot::DELIVER, &mut Frame::new(input, out_head())))
+}
+
+/// One door's whole script, as one comparable transcript.
+fn transcript(dropped: bool, settings: &str) -> Value {
+    let host = Host::new();
+    let live = load(&host, dropped);
+    let validated: Vec<String> = [
+        "",
+        "{}",
+        r#"{"url":"http://x/","otlp_endpoint":1}"#,
+        "[1]",
+        settings,
+    ]
+    .iter()
+    .map(|s| validate(&live, s))
+    .collect();
+    let opened = open(&live, settings);
+    let answers = kind_answers(&live);
+    let delivered = [
+        deliver(
+            &host,
+            &live,
             &[
-                ("traces".into(), collector.clone()),
-                ("again".into(), collector.clone()),
+                record("0000000000000011", None),
+                json!({"name": "no identity"}),
             ],
         ),
-    );
-    let open = |settings: &Value| {
-        registry
-            .open_export(ALIAS, &settings.to_string())
-            .expect("opens")
-    };
-    let live = open(&collector);
-    let started = (live.start(), open(&refused).start());
-    live.deliver(ExportStream::Traces, &record("0000000000000011", None))
-        .unwrap();
-    live.deliver(ExportStream::Traces, &json!({"name": "no identity"}))
-        .unwrap();
-    let failing = open(&failing);
-    let _ = failing.start();
-    failing
-        .deliver(
-            ExportStream::Traces,
-            &record("0000000000000012", Some("0000000000000011")),
-        )
-        .unwrap();
+        deliver(&host, &live, &[json!({"name": "no identity"})]),
+        deliver(
+            &host,
+            &live,
+            &[record("0000000000000012", Some("0000000000000011"))],
+        ),
+        deliver_ticketless(&live),
+    ];
+    let refreshed = refresh(&live, MOVED);
+    let moved = deliver(&host, &live, &[record("0000000000000013", None)]);
+    let closed = close(&live);
+
+    let others: Vec<Value> = [FAILING, INTERNAL, PLAINTEXT]
+        .iter()
+        .map(|s| {
+            let p = load(&host, dropped);
+            let opened = open(&p, s);
+            let first = deliver(&host, &p, &[record("0000000000000021", None)]);
+            let again = deliver(&host, &p, &[record("0000000000000022", None)]);
+            json!([opened, first, again, close(&p)])
+        })
+        .collect();
+
     json!({
-        "validated": format!("{validated:?}"),
-        "started": format!("{started:?}"),
-        "streams": format!("{:?}", live.streams()),
-        "egress": live.egress().as_token(),
-        "carried": CARRIED.lock().unwrap().clone(),
+        "name": live.name(),
+        "kind": format!("{:?}", live.kind()),
+        "max_inflight": live.max_inflight(),
+        "validate": validated,
+        "open": opened,
+        "answers": answers,
+        "deliver": delivered,
+        "refresh": refreshed,
+        "moved": moved,
+        "close": closed,
+        "others": others,
+        "carried": host.collector.carried.lock().unwrap().clone(),
+        "lines": host.lines.0.lock().unwrap().clone(),
     })
 }
 
-/// Every body the carrier was handed, decoded by the publisher's types — and re-encoded to the
+/// Every body the collector was handed, decoded by the publisher's types — and re-encoded to the
 /// very same bytes.
 fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
     run["carried"]
@@ -277,114 +524,187 @@ fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
         .collect()
 }
 
-/// The linked and the dropped-in OTLP sink register one statement and hand the host byte-identical
-/// transcripts — every request an OTLP export by the proto's own types; the RED arms diverge.
+/// The linked and the dropped-in OTLP sink are ONE plugin: the same answers, the same requests to
+/// the collector, the same log — and the same image over another config is not (RED).
 #[test]
 fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
-    let _guard = installed();
-    let linked = linked_door();
-    let lib = cdylib();
-    let dropped = dropped_door("both", statement(&linked), &lib, [9u8; 32]);
-    let (a, b) = (statement(&linked), statement(&dropped));
-    assert_eq!(
-        (a.name.as_str(), a.alias.as_str()),
-        ("busbar-export-otlp", "otlp")
+    let linked = transcript(false, COLLECTOR);
+    let dropped_in = transcript(true, COLLECTOR);
+    assert_eq!(linked, dropped_in, "the two doors are not one plugin");
+
+    assert_eq!(linked["name"], "busbar-export-otlp");
+    assert_eq!(linked["kind"], "Export");
+    assert_eq!(linked["max_inflight"], 64);
+    let validate = linked["validate"].as_array().unwrap();
+    assert!(
+        validate[0]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed settings: EOF while parsing"),
+        "{validate:?}"
     );
-    assert_eq!(a.declares.egress, EgressPolicy::Collector);
-    let same = |m: &Manifest| {
+    assert_eq!(validate[1], "Failed settings: missing field `url`");
+    assert_eq!(
+        validate[2],
+        "Failed settings: unknown field `otlp_endpoint`, expected `url`"
+    );
+    assert!(
+        validate[3]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed settings: invalid type: "),
+        "{validate:?}"
+    );
+    assert_eq!(validate[4], "Ready ");
+    assert_eq!(linked["open"], "Ready ");
+    assert_eq!(
+        linked["answers"],
+        json!({"scrape": "Refused ", "status": "Ready ", "check": "Ready ", "serve": "Refused "})
+    );
+    assert_eq!(
+        linked["deliver"],
+        json!(["Ready ", "Ready ", "Ready ", "Ready "])
+    );
+    assert_eq!(linked["refresh"], "Ready ");
+    assert_eq!(linked["moved"], "Ready ");
+    assert_eq!(linked["close"], "Ready ");
+
+    // What the collector was handed: the two span batches (the record with no identity asked for
+    // nothing), the moved target's, and the failing collector's two; nothing for a refused target.
+    let carried = linked["carried"].as_array().unwrap();
+    let route = |c: &Value| {
         (
-            m.name.clone(),
-            m.alias.clone(),
-            m.kind.clone(),
-            m.declares.clone(),
+            c["target"].as_str().unwrap().to_owned(),
+            c["head_target"].as_str().unwrap().to_owned(),
         )
     };
-    assert_eq!(same(&a), same(&b), "both doors state the same plugin");
-
-    let linked_run = transcript(&linked);
-    let dropped_run = transcript(&dropped);
-    // What the host sees, spelled out once so the equality below is about the right thing.
-    let text = linked_run.to_string();
-    for want in [
-        r#""egress":"collector""#,
-        r#""policy":"collector""#,
-        r#""url":"http://127.0.0.1:4318/v1/traces""#,
-        r#""url":"https://collector.example/fail""#,
-        r#"["content-type","application/x-protobuf"]"#,
-        r#"["authorization","Basic dTpw"]"#,
-        r#""timeout_ms":10000"#,
-        "Ok(Some((true, 0, \\\"\\\")))",
-        "Ok(Some((false, 0, \\\"\\\")))",
-        "unknown field `otlp_endpoint`, expected `url`",
-        // The sink has no checks of its own: the host refuses a second instance while resolving.
-        "\"]), Some([]))",
-        "[Traces]",
-    ] {
-        assert!(
-            text.contains(want),
-            "linked transcript lacks {want}: {text}"
+    assert_eq!(
+        carried.iter().map(route).collect::<Vec<_>>(),
+        [
+            ("http://127.0.0.1:4318/v1/traces", "/v1/traces"),
+            ("http://127.0.0.1:4318/v1/traces", "/v1/traces"),
+            ("http://127.0.0.1:4318/v2/traces", "/v2/traces"),
+            ("https://u:p@collector.example/fail", "/fail"),
+            ("https://u:p@collector.example/fail", "/fail"),
+        ]
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+    );
+    for c in carried {
+        assert_eq!(c["need"], 0);
+        assert_eq!(c["method"], "POST");
+        assert_eq!(c["timeout_ms"], 10_000);
+        assert_eq!(
+            c["fields"][0],
+            json!(["content-type", "application/x-protobuf"])
         );
     }
-    assert_eq!(linked_run, dropped_run, "the two doors are one plugin");
+    assert_eq!(carried[0]["fields"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        carried[3]["fields"][1],
+        json!(["authorization", "Basic dTpw"]),
+        "the userinfo rides as a Basic header"
+    );
 
-    // Two spans carried (the record with no identity asked for nothing), each its own request.
-    let bodies = otlp_bodies(&linked_run);
-    assert_eq!(bodies.len(), 2, "{text}");
+    let bodies = otlp_bodies(&linked);
     let spans: Vec<_> = bodies
         .iter()
-        .map(|r| &r.resource_spans[0].scope_spans[0].spans[0])
+        .map(|r| &r.resource_spans[0].scope_spans[0].spans)
         .collect();
-    assert_eq!(spans[0].span_id, vec![0, 0, 0, 0, 0, 0, 0, 0x11]);
-    assert!(spans[0].parent_span_id.is_empty());
-    assert_eq!(spans[1].parent_span_id, spans[0].span_id);
-    assert_eq!(spans[1].trace_id, spans[0].trace_id);
+    assert_eq!(spans[0].len(), 1, "the record that is no span adds nothing");
+    assert_eq!(spans[0][0].span_id, vec![0, 0, 0, 0, 0, 0, 0, 0x11]);
+    assert!(spans[0][0].parent_span_id.is_empty());
+    assert_eq!(spans[1][0].parent_span_id, spans[0][0].span_id);
+    assert_eq!(spans[1][0].trace_id, spans[0][0].trace_id);
     assert_eq!(
-        spans[0].end_time_unix_nano - spans[0].start_time_unix_nano,
+        spans[0][0].end_time_unix_nano - spans[0][0].start_time_unix_nano,
         42_000
     );
 
-    // RED ARM 1: a tarball without the declaration the linked row states is judged under the open
-    // web: the plaintext loopback collector is refused at start, and nothing is carried.
-    let mut undeclared = statement(&linked);
-    undeclared.name = "busbar-export-otlp-undeclared".into();
-    undeclared.alias = "otlp-undeclared".into();
-    undeclared.declares = Default::default();
-    let bare = dropped_door("undeclared", undeclared, &lib, [9u8; 32]);
-    let sink = bare
-        .open_export(
-            "otlp-undeclared",
-            r#"{"url":"http://127.0.0.1:4318/v1/traces"}"#,
-        )
-        .expect("opens");
-    assert_eq!(sink.egress(), EgressPolicy::OpenWeb);
-    assert_eq!(sink.start(), Ok(Some((false, 0, String::new()))));
-    CARRIED.lock().unwrap().clear();
-    sink.deliver(ExportStream::Traces, &record("0000000000000013", None))
-        .unwrap();
+    // The log: enabled on the first carried export of each instance and again after the refresh
+    // that moved its target (the need is re-declared), the record that is no span
+    // and every dropped export at debug, the endpoint always masked; a refused target disabled.
+    let lines: Vec<String> = linked["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap().to_owned())
+        .collect();
+    let all = lines.join("\n");
     assert!(
-        CARRIED.lock().unwrap().is_empty(),
-        "the open web carried a plaintext loopback export"
+        !all.contains("u:p@"),
+        "a line carries the credential: {all}"
+    );
+    let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
+    assert_eq!(count("OTLP tracing enabled"), 3, "{all}");
+    assert_eq!(
+        count("OTLP tracing enabled endpoint=http://127.0.0.1:4318/v1/traces"),
+        1,
+        "{all}"
+    );
+    assert_eq!(
+        count("OTLP tracing enabled endpoint=http://127.0.0.1:4318/v2/traces"),
+        1,
+        "{all}"
+    );
+    assert_eq!(
+        count("OTLP tracing enabled endpoint=https://***@collector.example/fail"),
+        1,
+        "{all}"
+    );
+    assert_eq!(count("skipped a record with no span identity"), 2, "{all}");
+    assert_eq!(count("returned a non-2xx status"), 2, "{all}");
+    assert_eq!(count("status=503"), 2, "{all}");
+    assert_eq!(count("; disabling OTLP trace export"), 2, "{all}");
+    assert_eq!(
+        count("OTLP span export failed"),
+        1,
+        "the ticketless delivery: {all}"
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.contains("disabling"))
+            .all(|l| l.starts_with("2 ")),
+        "a refusal is an error line: {all}"
     );
 
-    // RED ARM 2: the same declaration, signed by a third party, is refused at open.
-    let mut third = statement(&linked);
-    third.name = "busbar-export-otlp-acme".into();
-    third.alias = "otlp-acme".into();
-    third.publisher = "acme".into();
-    let refused = dropped_door("third", third, &lib, [5u8; 32])
-        .open_export("otlp-acme", r#"{"url":"http://127.0.0.1:4318/v1/traces"}"#)
-        .expect_err("a third party is not granted the collector policy");
+    // RED: the same image over another config answers another transcript.
+    let other = transcript(true, PLAINTEXT);
+    assert_ne!(
+        other, linked,
+        "a door over another config must not compare equal"
+    );
+}
+
+/// RED: the door asked for as another kind is refused, by either origin, before any slot runs.
+#[test]
+fn a_wrong_kind_is_refused() {
+    let host = Host::new();
+    let err = load_linked::<Secret>(&row(), host.bind())
+        .expect_err("an export door is not a secret door");
     assert!(
-        refused.contains(
-            "declares the `collector` egress policy, which the host grants to a \
-             first-party plugin only"
+        matches!(
+            err,
+            LoadError::WrongKind { .. } | LoadError::StatementMismatch
         ),
-        "{refused}"
+        "{err:?}"
     );
+    let err = load_dropped::<Secret>(&cdylib(), &row().statement, host.bind())
+        .expect_err("the dropped-in export door is not a secret door");
+    assert!(matches!(err, LoadError::ManifestKind { .. }), "{err:?}");
+}
 
-    // RED ARM 3: without the linked row the module is not on the axis.
-    assert!(PluginRegistry::empty().resolve(ALIAS).is_none());
-    assert!(PluginRegistry::empty()
-        .validate_export(ALIAS, "t", &json!({}))
-        .is_none());
+/// RED: a manifest stating 1.5.5's export ABI (2) is refused before `dlopen` (THE DESIGN §11.8).
+#[test]
+fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
+    let mut stated = row().statement;
+    let at = RENDERING_MAGIC.len() + 8;
+    assert_eq!(
+        u32::from_le_bytes(stated[at..at + 4].try_into().unwrap()),
+        export::ABI_VERSION
+    );
+    stated[at..at + 4].copy_from_slice(&(export::ABI_VERSION - 1).to_le_bytes());
+    let err = load_dropped::<Export>(&cdylib(), &stated, Host::new().bind())
+        .expect_err("1.5.5's export ABI is refused");
+    assert!(matches!(err, LoadError::ManifestKindAbi { .. }), "{err:?}");
 }
