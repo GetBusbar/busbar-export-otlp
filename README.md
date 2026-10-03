@@ -5,7 +5,7 @@ First-party signed kind:export plugin cdylib: the OTLP trace export sink (module
 
 | kind | alias | crate | busbar | license |
 |---|---|---|---|---|
-| `export` | `otlp` | `busbar-export-otlp-plugin` | 1.6.0 (pinned in `.busbar-ref`) | MIT |
+| `export` | `otlp` | `busbar-export-otlp-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
 
 [![ci](https://github.com/GetBusbar/busbar-export-otlp/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-export-otlp/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
