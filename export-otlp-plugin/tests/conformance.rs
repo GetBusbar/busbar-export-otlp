@@ -158,6 +158,11 @@ impl DeclaredConns for Collector {
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
         true
     }
+
+    /// The collector serves the one scheme the sink's need names.
+    fn serves_scheme(&self, transport: &str) -> bool {
+        transport == "http"
+    }
 }
 
 impl Conns for Collector {
