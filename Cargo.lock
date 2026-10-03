@@ -96,6 +96,7 @@ version = "1.6.0"
 dependencies = [
  "busbar-contract",
  "busbar-export-otlp",
+ "busbar-export-otlp-plugin",
  "busbar-plugin-loader",
  "opentelemetry-proto",
  "prost",

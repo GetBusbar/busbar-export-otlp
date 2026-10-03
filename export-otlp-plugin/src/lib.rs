@@ -14,7 +14,9 @@
 
 pub use busbar_export_otlp::*;
 
-/// The exported door: the macro's `#[no_mangle]` symbol is the one exemption.
+/// The exported door, behind `dropped-in` (the cdylib build only): the macro's `#[no_mangle]` symbol is
+/// the one exemption.
+#[cfg(feature = "dropped-in")]
 #[allow(unsafe_code)]
 mod exported {
     busbar_contract::export_door!(busbar_export_otlp::door::door);
