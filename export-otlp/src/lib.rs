@@ -38,6 +38,24 @@ pub mod proto;
 
 pub use config::OtlpSettings;
 
+/// THE LIMITS CHECK across every configured instance of this sink, in configuration order: the sink
+/// states the `one_instance` mark, so a second instance is refused in busbar 1.5.5's words, once per
+/// extra instance, naming the first.
+pub fn check_limits(instances: &[String]) -> Vec<String> {
+    let Some((first, rest)) = instances.split_first() else {
+        return Vec::new();
+    };
+    rest.iter()
+        .map(|name| {
+            format!(
+                "export.{name}: a second `module: {ALIAS}` instance (already defined as '{first}'). \
+                 OTLP installs the ONE process-global tracer subscriber, so a second instance could \
+                 only be silently ignored — keep a single instance."
+            )
+        })
+        .collect()
+}
+
 /// The plugin's canonical name.
 pub const NAME: &str = "busbar-export-otlp";
 /// The module name an `export:` instance names it by.
