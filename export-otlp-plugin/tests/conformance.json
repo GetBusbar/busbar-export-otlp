@@ -6,7 +6,9 @@
       { "settings": { "url": "http://x/", "otlp_endpoint": 1 },
         "refusal": "settings: unknown field `otlp_endpoint`, expected `url`" }
     ],
-    "deliver": [],
+    "deliver": [
+      { "stream": "traces", "batch": "{\"ts\":1}\n", "observed": [] }
+    ],
     "scrape": [],
     "status": { "outcome": "Ready" },
     "check": { "outcome": "Ready" },
