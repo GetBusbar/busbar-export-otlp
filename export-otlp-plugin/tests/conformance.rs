@@ -138,6 +138,7 @@ impl DeclaredConns for Collector {
         need: NeedId,
         spec: &ReadNeed,
         target: Option<&str>,
+        _trust: Option<&str>,
     ) -> Result<(), ConnError> {
         self.slab.declare(owner, need);
         self.declared
@@ -156,6 +157,10 @@ impl DeclaredConns for Collector {
     }
 
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
+        true
+    }
+
+    fn serves_scheme(&self, _: &str) -> bool {
         true
     }
 }
@@ -208,7 +213,14 @@ impl Conns for Collector {
         Ok(id)
     }
 
-    fn write(&self, c: InstanceId, id: ConnId, b: &[u8], _: bool) -> Result<usize, ConnError> {
+    fn write(
+        &self,
+        c: InstanceId,
+        id: ConnId,
+        b: &[u8],
+        _: bool,
+        _: bool,
+    ) -> Result<usize, ConnError> {
         self.slab.get(c, id)?;
         Ok(b.len())
     }
