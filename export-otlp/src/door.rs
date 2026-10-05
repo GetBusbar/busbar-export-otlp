@@ -55,6 +55,11 @@ const NEEDS: &[Need] = &[Need {
     keep_response_headers: std::ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: EXPORT_TIMEOUT_MS,
+    // The collector's response head is not read: the named (empty) list, nothing denied beyond it.
+    keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
+    _reserved: 0,
+    deny_response_headers: std::ptr::null(),
+    deny_response_headers_len: 0,
 }];
 
 /// The one stream the sink carries.
