@@ -19,13 +19,13 @@ use std::task::Poll;
 
 use busbar_contract::abi::export::{
     cancel, CheckIn, CheckOut, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn, ServeOut,
-    StatusOut, Tail,
+    StatusOut, Tail, CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED,
 };
-use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Statement};
+use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
@@ -76,6 +76,8 @@ pub const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
+    // OTLP installs the ONE process-global tracer subscriber: at most one instance.
+    marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
 
@@ -313,14 +315,36 @@ impl SafeSlot for Status {
     }
 }
 
-/// `check`: the sink has no checks of its own.
+/// `check`: at the limits phase, 1.5.5's refusal of every instance after the first
+/// ([`crate::check_limits`]) — the sink states the `one_instance` mark, so the host asks it while
+/// the configuration is resolved; READY with nothing otherwise.
 pub struct Check;
 
 impl SafeSlot for Check {
     type In = CheckIn;
     type Out = CheckOut;
     type State = Held<Otlp>;
-    fn call(_: Instance<'_, Held<Otlp>>, _: Lent<'_, CheckIn>, _: Out<'_, CheckOut>) -> Outcome {
+    fn call(
+        instance: Instance<'_, Held<Otlp>>,
+        input: Lent<'_, CheckIn>,
+        mut out: Out<'_, CheckOut>,
+    ) -> Outcome {
+        let Some(h) = instance.get() else {
+            return Outcome::Refused;
+        };
+        if input.phase != CHECK_PHASE_LIMITS {
+            return Outcome::Ready;
+        }
+        let names: Vec<String> = input
+            .instances()
+            .iter()
+            .map(|c| String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned())
+            .collect();
+        let lines = crate::check_limits(&names);
+        if !lines.is_empty() {
+            let json = serde_json::to_vec(&lines).unwrap_or_default();
+            out.lease(|o| &o.findings, h.leases(), json, BLOB_JSON);
+        }
         Outcome::Ready
     }
 }

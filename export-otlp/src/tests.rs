@@ -306,3 +306,29 @@ fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
         assert_eq!(base64(input), want);
     }
 }
+
+/// THE ONE-INSTANCE REFUSAL, byte for byte the line busbar 1.5.5's `--validate` printed for a second
+/// `module: otlp` instance (busbar `tests/v1.5.5-validate/refusals.txt`): one line per instance after
+/// the first, naming the first; one instance, or none, is no finding.
+#[test]
+fn a_second_instance_is_refused_in_1_5_5_words() {
+    assert!(check_limits(&[]).is_empty());
+    assert!(check_limits(&["traces".to_string()]).is_empty());
+    assert_eq!(
+        check_limits(&["traces".to_string(), "again".to_string()]),
+        vec![
+            "export.again: a second `module: otlp` instance (already defined as 'traces'). OTLP \
+             installs the ONE process-global tracer subscriber, so a second instance could only be \
+             silently ignored — keep a single instance."
+                .to_string()
+        ]
+    );
+}
+
+/// The sink states the `one_instance` mark, which is what makes the host ask its limits check while
+/// the configuration is resolved.
+#[test]
+fn the_statement_marks_one_instance() {
+    use busbar_contract::abi::mechanism::door::MARK_ONE_INSTANCE;
+    assert_eq!(door::STATEMENT.marks & MARK_ONE_INSTANCE, MARK_ONE_INSTANCE);
+}

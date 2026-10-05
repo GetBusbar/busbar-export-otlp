@@ -1,0 +1,15 @@
+{
+  "settings": { "url": "http://collector.example/v1/traces" },
+  "export": {
+    "bad_settings": [
+      { "settings": {}, "refusal": "settings: missing field `url`" },
+      { "settings": { "url": "http://x/", "otlp_endpoint": 1 },
+        "refusal": "settings: unknown field `otlp_endpoint`, expected `url`" }
+    ],
+    "deliver": [],
+    "scrape": [],
+    "status": { "outcome": "Ready" },
+    "check": { "outcome": "Ready" },
+    "serve": [ { "method": "GET", "path": "/exports/traces/x", "outcome": "Refused" } ]
+  }
+}
