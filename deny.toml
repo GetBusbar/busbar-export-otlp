@@ -1,5 +1,5 @@
 # RENDERED by `busbar-release plugin sync` from GetBusbar/busbar-release template/ and busbar's
-# `.github/fleet/deps.toml` at 8fc3b1b2a6d123575a77ce505e501b595fb24cef; a hand edit is overwritten by the next sync. CI runs
+# `.github/fleet/deps.toml` at 18029a9e87c9afd7aa18b7563f3635c43318dcbc; a hand edit is overwritten by the next sync. CI runs
 # `cargo deny check` on it (busbar's plugin-ci.yml at the pin). The license allowlist is busbar's own;
 # the one reviewed git source is busbar itself, at the pin.
 [graph]
