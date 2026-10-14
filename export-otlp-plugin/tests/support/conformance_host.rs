@@ -229,6 +229,7 @@ impl Opened {
             claims: stated.claims,
             role: stated.role,
             composes_over: stated.composes_over,
+            ported: stated.ported,
             status_rows: stated.status_rows,
             duplex: stated
                 .upgrades
