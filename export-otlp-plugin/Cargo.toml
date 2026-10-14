@@ -23,8 +23,14 @@ busbar-contract = { workspace = true }
 # The conformance test loads the built cdylib and the linked door over the REAL loader and drives
 # both through the one dispatcher — dev-only, never in the shipped artifact. Same pinned rev as the
 # logic crate's busbar-contract, so one busbar source resolves.
-busbar-plugin-loader = { workspace = true }
+busbar-plugin-loader = { workspace = true, features = ["conformance"] }
 serde_json = { workspace = true }
 # The OpenTelemetry project's own generated OTLP types, to decode what the host was asked to carry.
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true, features = ["default"] }
+# THE SUITE'S HOST CONNECTOR (tests/support/conformance_host.rs, rendered): busbar's connector, its
+# TLS test kit, and the transport framers this plugin's needs name. Dev-only.
+busbar-core-connector = { workspace = true }
+busbar-transport-tcp = { workspace = true }
+busbar-transport-http = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
