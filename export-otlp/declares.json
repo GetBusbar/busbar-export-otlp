@@ -3,5 +3,8 @@
     "min": 3,
     "max": 3
   },
-  "egress": "collector"
+  "egress": "collector",
+  "needs": [
+    "http"
+  ]
 }
