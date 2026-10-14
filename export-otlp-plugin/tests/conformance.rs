@@ -52,8 +52,9 @@ use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::kinds::secret::Secret;
 use busbar_plugin_loader::dispatch::{
-    in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, Diagnostic, DispatchConfig,
-    Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin, NO_BLOB,
+    in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, ConnTable, Diagnostic,
+    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin,
+    NO_BLOB,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use prost::Message as _;
@@ -138,6 +139,7 @@ impl DeclaredConns for Collector {
         need: NeedId,
         spec: &ReadNeed,
         target: Option<&str>,
+        _: Option<&str>,
     ) -> Result<(), ConnError> {
         self.slab.declare(owner, need);
         self.declared
@@ -157,6 +159,11 @@ impl DeclaredConns for Collector {
 
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
         true
+    }
+
+    /// The collector's need is the host's `http` framer (Part 2 #50's boot scheme match).
+    fn serves_scheme(&self, transport: &str) -> bool {
+        transport == "http"
     }
 }
 
@@ -208,7 +215,14 @@ impl Conns for Collector {
         Ok(id)
     }
 
-    fn write(&self, c: InstanceId, id: ConnId, b: &[u8], _: bool) -> Result<usize, ConnError> {
+    fn write(
+        &self,
+        c: InstanceId,
+        id: ConnId,
+        b: &[u8],
+        _: bool,
+        _: bool,
+    ) -> Result<usize, ConnError> {
         self.slab.get(c, id)?;
         Ok(b.len())
     }
@@ -285,7 +299,7 @@ impl Host {
             max_inflight_cap: 64,
             sink,
             dispatcher: self.d.adopter(),
-            conns: Some(conns),
+            conns: ConnTable::Host(conns),
         }
     }
 }
