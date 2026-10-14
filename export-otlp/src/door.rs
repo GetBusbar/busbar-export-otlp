@@ -22,7 +22,7 @@ use busbar_contract::abi::export::{
     StatusOut, Tail,
 };
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED,
+    Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement};
@@ -55,6 +55,10 @@ const NEEDS: &[Need] = &[Need {
     keep_response_headers: std::ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: EXPORT_TIMEOUT_MS,
+    keep_mode: KEEP_NAMED,
+    _reserved: 0,
+    deny_response_headers: std::ptr::null(),
+    deny_response_headers_len: 0,
 }];
 
 /// The one stream the sink carries.
