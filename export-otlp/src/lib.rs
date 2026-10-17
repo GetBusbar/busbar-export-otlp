@@ -12,7 +12,7 @@
 //! ([`proto`]): one resource (`service.name = busbar`), one scope (`busbar`), one span per record.
 //!
 //! **Who dials.** The HOST: the sink declares one outbound need ([`door::STATEMENT`]) — framed
-//! `http`, its target the instance's `url` with the userinfo stripped, under the
+//! `http`, pinned to the instance's `url` setting with the userinfo stripped, under the
 //! `loopback-allowed` egress class (`https://`, or plaintext `http://` to a loopback collector
 //! only) — and a delivery is one
 //! `exchange()` over it: `POST`, `content-type: application/x-protobuf`. The sink never dials.
@@ -37,6 +37,24 @@ pub mod door;
 pub mod proto;
 
 pub use config::OtlpSettings;
+
+/// THE LIMITS CHECK across every configured instance of this sink, in configuration order: the sink
+/// states the `one_instance` mark, so a second instance is refused in busbar 1.5.5's words, once per
+/// extra instance, naming the first.
+pub fn check_limits(instances: &[String]) -> Vec<String> {
+    let Some((first, rest)) = instances.split_first() else {
+        return Vec::new();
+    };
+    rest.iter()
+        .map(|name| {
+            format!(
+                "export.{name}: a second `module: {ALIAS}` instance (already defined as '{first}'). \
+                 OTLP installs the ONE process-global tracer subscriber, so a second instance could \
+                 only be silently ignored — keep a single instance."
+            )
+        })
+        .collect()
+}
 
 /// The plugin's canonical name.
 pub const NAME: &str = "busbar-export-otlp";
