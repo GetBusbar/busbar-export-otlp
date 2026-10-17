@@ -1,15 +1,19 @@
 {
-  "settings": { "url": "http://collector.example/v1/traces" },
+  "settings": { "url": "https://localhost:54017/v1/traces" },
+  "dialing_steps": ["deliver #0"],
   "export": {
     "bad_settings": [
       { "settings": {}, "refusal": "settings: missing field `url`" },
-      { "settings": { "url": "http://x/", "otlp_endpoint": 1 },
-        "refusal": "settings: unknown field `otlp_endpoint`, expected `url`" }
+      { "settings": { "url": "https://collector.example/v1/traces", "bogus": 1 },
+        "refusal": "settings: unknown field `bogus`, expected `url`" },
+      { "settings": { "url": 5 },
+        "refusal": "settings: invalid type: integer `5`, expected a string" }
     ],
     "deliver": [
-      { "stream": "traces", "batch": "{\"ts\":1}\n", "observed": [] }
+      { "stream": "traces",
+        "batch": "{\"trace_id\":\"0000000000000011\",\"span_id\":\"0000000000000011\",\"name\":\"forward\",\"start\":1700000000000000,\"duration_us\":42,\"pool\":\"p1\",\"ingress\":\"openai\",\"op\":\"chat\"}\n",
+        "observed": [] }
     ],
-    "scrape": [],
     "status": { "outcome": "Ready" },
     "check": { "outcome": "Ready" },
     "serve": [ { "method": "GET", "path": "/exports/traces/x", "outcome": "Refused" } ]
