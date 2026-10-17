@@ -22,7 +22,7 @@ use busbar_contract::abi::export::{
     StatusOut, Tail, CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED,
+    Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
@@ -58,7 +58,7 @@ pub(crate) const NEEDS: &[Need] = &[Need {
     keep_response_headers_len: 0,
     timeout_ms: EXPORT_TIMEOUT_MS,
     // The collector's response head is not read: the named (empty) list, nothing denied beyond it.
-    keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
+    keep_mode: KEEP_NAMED,
     _reserved: 0,
     deny_response_headers: std::ptr::null(),
     deny_response_headers_len: 0,

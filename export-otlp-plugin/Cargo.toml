@@ -28,3 +28,9 @@ serde_json = { workspace = true }
 # The OpenTelemetry project's own generated OTLP types, to decode what the host was asked to carry.
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true, features = ["default"] }
+# THE SUITE'S HOST CONNECTOR (tests/support/conformance_host.rs, rendered): busbar's connector, its
+# TLS test kit, and the transport framers this plugin's needs name. Dev-only.
+busbar-core-connector = { workspace = true }
+busbar-transport-tcp = { workspace = true }
+busbar-transport-http = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }

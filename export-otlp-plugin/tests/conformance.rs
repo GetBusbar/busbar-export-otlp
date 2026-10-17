@@ -52,8 +52,9 @@ use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::kinds::secret::Secret;
 use busbar_plugin_loader::dispatch::{
-    in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, Diagnostic, DispatchConfig,
-    Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin, NO_BLOB,
+    in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, ConnTable, Diagnostic,
+    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin,
+    NO_BLOB,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use prost::Message as _;
@@ -138,7 +139,7 @@ impl DeclaredConns for Collector {
         need: NeedId,
         spec: &ReadNeed,
         target: Option<&str>,
-        _trust: Option<&str>,
+        _: Option<&str>,
     ) -> Result<(), ConnError> {
         self.slab.declare(owner, need);
         self.declared
@@ -160,8 +161,9 @@ impl DeclaredConns for Collector {
         true
     }
 
-    fn serves_scheme(&self, _: &str) -> bool {
-        true
+    /// The collector's need is the host's `http` framer (Part 2 #50's boot scheme match).
+    fn serves_scheme(&self, transport: &str) -> bool {
+        transport == "http"
     }
 }
 
@@ -297,7 +299,7 @@ impl Host {
             max_inflight_cap: 64,
             sink,
             dispatcher: self.d.adopter(),
-            conns: Some(conns),
+            conns: ConnTable::Host(conns),
         }
     }
 }
@@ -726,12 +728,53 @@ fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
     assert!(matches!(err, LoadError::ManifestKindAbi { .. }), "{err:?}");
 }
 
-// THE PUBLISHED CONFORMANCE SUITE, RUN BY THIS PLUGIN (busbar's loader, at the commit this repo pins):
-// the sink driven two ways through the one loader over the export kind's script with the inputs in
-// `conformance.json`, every step's crossings exactly at the script's pin, the two folds equal, and
-// the suite's RED arms kept.
+// ── THE PUBLISHED CONFORMANCE SUITE ─────────────────────────────────────────────────────────────
+//
+// busbar's suite, at the commit this repo pins (`.busbar-ref`), drives the OTLP sink two ways
+// through the one loader: LINKED (the logic crate's `door::door`) and DROPPED IN (this crate's
+// built cdylib), over the export kind's script with the inputs in `conformance.json` (refused
+// settings in the grammar's words, a `traces` delivery that DIALS the collector, status and check,
+// a route-less `serve` refused; the sink carries no metrics, so no scrape); every step's crossings
+// exactly at the script's pin, the two folds equal, and the suite's RED arms kept. `plugin-ci.yml`
+// runs it under `--release`.
+//
+// THE HOST (ARCHITECT Q-P4-9): the sink's `http` need is served by busbar's own connector, composed
+// as the root composes it (`conformance_host`, rendered by the fleet template), and every delivery
+// reaches a REAL local HTTPS collector (the suite's far end, its certificate chained to the suite's
+// test anchors, which only the host trusts): the URL in `conformance.json`'s settings.
+
+#[path = "support/conformance_host.rs"]
+mod conformance_host;
+
+/// The collector's answer: an HTTP/1.1 `200` (an empty OTLP response) once a whole request (its
+/// head, then the `content-length` body it states) has been read.
+fn collected(seen: &[u8]) -> Option<Vec<u8>> {
+    let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+    let body = head
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    (seen.len() >= end + body).then(|| {
+        b"HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\ncontent-length: 0\r\n\r\n"
+            .to_vec()
+    })
+}
+
+/// The host the suite binds the sink over, with the collector its settings name already listening.
+fn suite_host(
+    wake: Arc<dyn Fn(u64) + Send + Sync>,
+    anchors: Option<&str>,
+) -> Arc<dyn DeclaredConns> {
+    conformance_host::far_end(collected);
+    conformance_host::host(wake, anchors)
+}
+
 busbar_plugin_loader::conformance_suite! {
     door: busbar_export_otlp::door::door,
     cdylib: "busbar_export_otlp_plugin",
     inputs: include_str!("conformance.json"),
+    host: suite_host,
+    tls: conformance_host::anchors(),
 }
