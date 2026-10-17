@@ -124,7 +124,9 @@ fn piece(kind: PieceKind, code: Option<u32>) -> Piece {
         status_code: code,
         status_namespace: None,
         retry_after_secs: None,
+        fault: None,
         reason: None,
+        declared_len: None,
     }
 }
 
@@ -764,7 +766,7 @@ fn collected(seen: &[u8]) -> Option<Vec<u8>> {
 
 /// The host the suite binds the sink over, with the collector its settings name already listening.
 fn suite_host(
-    wake: Arc<dyn Fn(u64) + Send + Sync>,
+    wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
 ) -> Arc<dyn DeclaredConns> {
     conformance_host::far_end(collected);
