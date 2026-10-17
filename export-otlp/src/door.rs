@@ -44,7 +44,7 @@ pub const NEED: u32 = 0;
 /// 1.5.5's exporter held its endpoint to. The sink names the target itself — the operator's URL
 /// with its userinfo stripped ([`Endpoint::collector`]) — so no credential is ever part of what the
 /// host dials; the userinfo travels only as the request's `Authorization`.
-const NEEDS: &[Need] = &[Need {
+pub(crate) const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_LOOPBACK_ALLOWED,
     transport: abi_str("http"),

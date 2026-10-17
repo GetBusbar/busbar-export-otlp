@@ -332,3 +332,19 @@ fn the_statement_marks_one_instance() {
     use busbar_contract::abi::mechanism::door::MARK_ONE_INSTANCE;
     assert_eq!(door::STATEMENT.marks & MARK_ONE_INSTANCE, MARK_ONE_INSTANCE);
 }
+
+/// THE NEED IS HELD TO THE OPERATOR'S COLLECTOR (THE DESIGN §5, PB-100: "Every declared need is held
+/// to its configured target: the loader's connection-table fill resolves a need's `target_from`
+/// against the instance's validated settings at open and refresh and declares the need pinned to
+/// that target"). The need names the `url` setting, so the host pins it to the collector the
+/// operator configured (its userinfo left out by the connector) and refuses a dial to any other
+/// host; a need with no `target_from` let the sink name its own dial target on every export.
+#[test]
+fn the_need_is_pinned_to_the_url_setting() {
+    assert_eq!(door::NEEDS.len(), 1);
+    assert_eq!(
+        door::NEEDS[0].target_from.len,
+        "settings.url".len(),
+        "the collector need names no configured target"
+    );
+}
