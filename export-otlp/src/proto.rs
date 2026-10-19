@@ -104,7 +104,7 @@ fn span(record: &Value) -> Option<Vec<u8>> {
 /// is zero (the invalid id in OTLP).
 fn id(value: &Value) -> Option<[u8; 8]> {
     let text = value.as_str()?;
-    if text.is_empty() || text.len() > 16 {
+    if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let n = u64::from_str_radix(text, 16).ok().filter(|n| *n != 0)?;

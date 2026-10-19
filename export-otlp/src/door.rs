@@ -83,7 +83,8 @@ pub const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
-    // OTLP installs the ONE process-global tracer subscriber: at most one instance.
+    // At most one instance: busbar refuses a second `module: otlp` sink while it resolves its
+    // configuration (the host owns that refusal, in 1.5.x's words), and this mark states it.
     marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
