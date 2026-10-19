@@ -74,7 +74,7 @@ const BASIC: &str = "Basic ";
 /// a URL with none, or a string that is not a URL, unchanged.
 pub fn mask_userinfo(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
-        return url.to_string();
+        return cut_userinfo(url, "***@");
     };
     if parsed.username().is_empty() && parsed.password().is_none() {
         return url.to_string();
@@ -94,7 +94,9 @@ pub fn mask_userinfo(url: &str) -> String {
 /// carries none or is not a URL. What the request carries never holds the secret in its target.
 pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     let Ok(mut parsed) = url::Url::parse(endpoint) else {
-        return (endpoint.to_string(), None);
+        // Not a URL the client can parse (1.5.5 accepted any string as the url): no credential is
+        // made of it, and its userinfo never reaches the host's dial target.
+        return (cut_userinfo(endpoint, ""), None);
     };
     let username = parsed.username().to_string();
     let password = parsed.password().map(str::to_string);
@@ -128,6 +130,20 @@ pub fn request_target(endpoint: &str) -> String {
             if target.is_empty() { "/" } else { target }.to_string()
         }
         Err(_) => "/".to_string(),
+    }
+}
+
+/// A string `url::Url` refuses (an out-of-range port, an empty host) that still carries
+/// `scheme://userinfo@…`: everything between `://` and the authority's last `@` is replaced by
+/// `with` (its `@` included). A string with no such authority is returned unchanged.
+fn cut_userinfo(url: &str, with: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://{with}{}", &rest[at + 1..]),
+        None => url.to_string(),
     }
 }
 
