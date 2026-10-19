@@ -352,3 +352,34 @@ fn the_need_is_pinned_to_the_url_setting() {
         "the collector need names no configured target"
     );
 }
+
+/// NO COLLECTOR CREDENTIAL RENDERS THROUGH `Debug` (Q128 export-otlp LOW, reader r82 on ba8cf38):
+/// the settings' url, the endpoint and the instance holding it mask the url's userinfo and redact
+/// the `Authorization` it became. RED before the fix: `Debug` was derived over the raw url and the
+/// decoded Basic token.
+#[test]
+fn no_collector_credential_renders_through_debug() {
+    let raw = br#"{"url":"https://ops:hunter2@collector.example/v1/traces"}"#;
+    let settings = crate::config::OtlpSettings::parse(raw).expect("parses");
+    let endpoint = crate::door::Endpoint::of(raw);
+    assert!(
+        endpoint.target.as_ref().is_some_and(|(_, a)| a.is_some()),
+        "the userinfo became an Authorization"
+    );
+    for text in [
+        format!("{settings:?}"),
+        format!("{settings:#?}"),
+        format!("{endpoint:?}"),
+        format!("{endpoint:#?}"),
+    ] {
+        assert!(!text.contains("hunter2"), "the password leaked: {text}");
+        assert!(
+            !text.contains("b3BzOmh1bnRlcjI"),
+            "the Basic token leaked: {text}"
+        );
+        assert!(
+            text.contains("collector.example"),
+            "the host is kept: {text}"
+        );
+    }
+}
