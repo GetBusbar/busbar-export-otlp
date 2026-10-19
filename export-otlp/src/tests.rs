@@ -119,6 +119,10 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
         json!({"trace_id": "not-hex", "span_id": "0000000000000001"}),
         json!({"trace_id": "00000000000000001", "span_id": "0000000000000001"}),
         json!({"trace_id": 1, "span_id": "0000000000000001"}),
+        // Not EXACTLY 16 hex digits (Q128 export-otlp NIT, reader r61): short, and a leading `+`.
+        json!({"trace_id": "2a", "span_id": "0000000000000001"}),
+        json!({"trace_id": "0000000000000001", "span_id": "ff"}),
+        json!({"trace_id": "+00000000000002a", "span_id": "0000000000000001"}),
     ] {
         assert_eq!(proto::export_request([&record]), None, "{record}");
     }
@@ -222,7 +226,7 @@ fn the_request_target_is_the_path_and_query() {
 /// EOTLP-1: `from_str_radix` accepts a leading `+`, so `%+4` must stay literal (1.5.5 bytes).
 #[test]
 fn a_plus_after_percent_is_not_an_escape() {
-    assert_eq!(percent_decode("ab%+41cd"), "ab%+41cd");
+    assert_eq!(percent_decode("ab%+41cd"), b"ab%+41cd");
     assert_eq!(
         split_credentials("https://u:ab%+41cd@collector.example/v1").1,
         Some(format!("Basic {}", base64(b"u:ab%+41cd")))
@@ -236,7 +240,7 @@ fn the_small_encoders_match_their_standards() {
     assert_eq!(base64(b"fo"), "Zm8=");
     assert_eq!(base64(b"foo"), "Zm9v");
     assert_eq!(base64(b"user:pass"), "dXNlcjpwYXNz");
-    assert_eq!(percent_decode("a%20b%zz%4"), "a b%zz%4");
+    assert_eq!(percent_decode("a%20b%zz%4"), b"a b%zz%4");
     assert_eq!(
         split_credentials("http://localhost:4318/v1/traces"),
         ("http://localhost:4318/v1/traces".into(), None)
@@ -347,4 +351,71 @@ fn the_need_is_pinned_to_the_url_setting() {
         "settings.url".len(),
         "the collector need names no configured target"
     );
+}
+
+/// NO COLLECTOR CREDENTIAL RENDERS THROUGH `Debug` (Q128 export-otlp LOW, reader r82 on ba8cf38):
+/// the settings' url, the endpoint and the instance holding it mask the url's userinfo and redact
+/// the `Authorization` it became. RED before the fix: `Debug` was derived over the raw url and the
+/// decoded Basic token.
+#[test]
+fn no_collector_credential_renders_through_debug() {
+    let raw = br#"{"url":"https://ops:hunter2@collector.example/v1/traces"}"#;
+    let settings = crate::config::OtlpSettings::parse(raw).expect("parses");
+    let endpoint = crate::door::Endpoint::of(raw);
+    assert!(
+        endpoint.target.as_ref().is_some_and(|(_, a)| a.is_some()),
+        "the userinfo became an Authorization"
+    );
+    for text in [
+        format!("{settings:?}"),
+        format!("{settings:#?}"),
+        format!("{endpoint:?}"),
+        format!("{endpoint:#?}"),
+    ] {
+        assert!(!text.contains("hunter2"), "the password leaked: {text}");
+        assert!(
+            !text.contains("b3BzOmh1bnRlcjI"),
+            "the Basic token leaked: {text}"
+        );
+        assert!(
+            text.contains("collector.example"),
+            "the host is kept: {text}"
+        );
+    }
+}
+
+/// A USERINFO's PERCENT-ESCAPED OCTETS REACH THE COLLECTOR AS THEY ARE (Q128 export-otlp LOW, reader
+/// r91 on a776bd3; RFC 7617: the user-pass is an octet sequence; RFC 3986 percent-escapes encode
+/// octets): `p%FFw` is the bytes `p 0xFF w`, base64ed as written. RED before the fix: the octets
+/// went through a lossy UTF-8 reading, and `0xFF` reached the collector as `EF BF BD`.
+#[test]
+fn a_userinfos_escaped_octets_reach_the_collector_as_they_are() {
+    let (clean, auth) = crate::split_credentials("https://u:p%FFw@collector.example/v1/traces");
+    assert_eq!(clean, "https://collector.example/v1/traces");
+    // base64("u:p\xFFw") = "dTpw/3c=".
+    assert_eq!(auth.as_deref(), Some("Basic dTpw/3c="));
+}
+
+/// A URL THAT DOES NOT PARSE STILL KEEPS ITS USERINFO OUT OF EVERY LINE AND THE DIAL TARGET (Q128
+/// export-otlp LOW, reader r131 on d26b358): 1.5.5 accepted any string as the url, so one that
+/// carries `user:pass` but fails to parse (an out-of-range port) is masked by cutting at the
+/// authority's last `@`, in the lines, in `Debug` and in the collector handed to the host. RED
+/// before the fix: the password rode all three.
+#[test]
+fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
+    let url = "https://ops:hunter2@collector.example:99999/v1/traces";
+    assert!(url::Url::parse(url).is_err(), "the fixture does not parse");
+    assert_eq!(
+        crate::mask_userinfo(url),
+        "https://***@collector.example:99999/v1/traces"
+    );
+    let (collector, auth) = crate::split_credentials(url);
+    assert!(!collector.contains("hunter2"), "{collector}");
+    assert_eq!(auth, None);
+    let raw = format!(r#"{{"url":"{url}"}}"#);
+    let endpoint = crate::door::Endpoint::of(raw.as_bytes());
+    let settings = crate::config::OtlpSettings::parse(raw.as_bytes()).expect("parses");
+    for text in [format!("{endpoint:?}"), format!("{settings:?}")] {
+        assert!(!text.contains("hunter2"), "{text}");
+    }
 }

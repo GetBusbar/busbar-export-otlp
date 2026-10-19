@@ -259,8 +259,10 @@ dependencies = [
 name = "busbar-export-otlp"
 version = "1.6.0"
 dependencies = [
+ "base64 0.22.1",
  "busbar-contract",
  "opentelemetry-proto",
+ "percent-encoding",
  "prost",
  "serde",
  "serde_json",

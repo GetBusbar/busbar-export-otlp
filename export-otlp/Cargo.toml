@@ -26,6 +26,11 @@ serde_json = { workspace = true }
 # The operator's endpoint: its userinfo moves into an `Authorization: Basic` header and out of the
 # URL, and is masked in every line this sink writes.
 url = { workspace = true }
+# The OTLP request's protobuf encoding (the fleet's protobuf library; its derive writes the eight
+# messages this sink sends), and the userinfo's percent-decoding and Basic base64.
+prost = { workspace = true, features = ["derive"] }
+percent-encoding = { workspace = true }
+base64 = { workspace = true }
 # The sink's own operator lines (enabled, disabled, a dropped export): the door's call capture
 # carries them, linked or dropped in, to the instance's own log (THE DESIGN §11.2 Plugin logging).
 tracing = { workspace = true }
