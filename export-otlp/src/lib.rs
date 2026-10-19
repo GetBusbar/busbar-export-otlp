@@ -132,53 +132,15 @@ pub fn request_target(endpoint: &str) -> String {
 }
 
 /// Percent-decode a URL userinfo component to its octets (`%XX` → the byte; anything else as
-/// written).
+/// written), through the `percent-encoding` crate.
 fn percent_decode(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex_pair = bytes
-            .get(i + 1..i + 3)
-            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
-            .and_then(|h| std::str::from_utf8(h).ok());
-        match (
-            bytes[i],
-            hex_pair.and_then(|h| u8::from_str_radix(h, 16).ok()),
-        ) {
-            (b'%', Some(b)) => {
-                out.push(b);
-                i += 3;
-            }
-            (b, _) => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    out
+    percent_encoding::percent_decode_str(s).collect()
 }
 
-/// Standard base64 (RFC 4648 §4, `=`-padded).
+/// Standard base64 (RFC 4648 §4, `=`-padded), through the `base64` crate.
 fn base64(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
-            if i <= chunk.len() {
-                out.push(char::from(ALPHABET[((n >> shift) & 0x3f) as usize]));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(input)
 }
 
 #[cfg(test)]
