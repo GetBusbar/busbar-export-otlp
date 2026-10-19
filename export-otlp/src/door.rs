@@ -83,13 +83,15 @@ pub const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
-    // OTLP installs the ONE process-global tracer subscriber: at most one instance.
+    // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
+    // refusal of a second `module: otlp` sink in 1.5.5's text (`crate::check_limits`).
     marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
 
-/// Where each export goes, as one instance's settings name it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
+/// the `Authorization` the url's userinfo became is redacted.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Endpoint {
     /// The settings' URL, userinfo masked: what every line names.
     pub shown: String,
@@ -99,6 +101,20 @@ pub struct Endpoint {
     /// The request target (path and query) and the `Authorization` the userinfo became; `None`
     /// when the settings did not parse.
     pub target: Option<(String, Option<String>)>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let target = self
+            .target
+            .as_ref()
+            .map(|(path, authorization)| (path, authorization.as_ref().map(|_| "<redacted>")));
+        f.debug_struct("Endpoint")
+            .field("shown", &self.shown)
+            .field("collector", &self.collector)
+            .field("target", &target)
+            .finish()
+    }
 }
 
 impl Endpoint {
@@ -184,7 +200,7 @@ impl Otlp {
             Ok(reply) => tracing::debug!(
                 endpoint = %shown,
                 status = reply.status,
-                "OTLP span export returned a non-2xx status; this span was dropped"
+                "OTLP span export returned a non-2xx status; this batch was dropped"
             ),
             Err(e) => dropped(shown, e),
         }
@@ -294,7 +310,7 @@ fn dropped(shown: &str, error: &ConnFailure) {
     tracing::debug!(
         endpoint = %shown,
         error = %error,
-        "OTLP span export failed; this span was dropped"
+        "OTLP span export failed; this batch was dropped"
     );
 }
 

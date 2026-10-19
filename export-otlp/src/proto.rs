@@ -2,8 +2,13 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE `traces` BATCH → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
-//! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded here by hand:
-//! the handful of messages it takes do not justify a code generator in the binary.
+//! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded by `prost`
+//! (the fleet's protobuf library) over the eight messages it takes, declared here with their
+//! `.proto` field numbers. Not through `opentelemetry-proto`: that crate depends on `opentelemetry`
+//! and `opentelemetry_sdk` unconditionally (its `trace` feature turns on `opentelemetry_sdk/trace`),
+//! which would link the OpenTelemetry SDK, a tracer runtime this sink does not run, into the
+//! shipped plugin. Its generated types stay the ORACLE: every request the suite builds is decoded
+//! with `opentelemetry-proto` and compared field by field.
 //!
 //! The request is `resource_spans[1]`: `resource.attributes = [service.name = "busbar"]`, one
 //! `scope_spans` whose `scope.name` is `busbar`, and one `Span` per record, in batch order:
@@ -23,6 +28,7 @@
 //! its default (empty, zero) left off, a `oneof` member written whenever it is set. A record with no
 //! usable `trace_id` or `span_id` is no span; a batch with no span encodes to nothing.
 
+use prost::Message as _;
 use serde_json::Value;
 
 /// The OTLP resource's `service.name`, and the instrumentation scope's name.
@@ -30,36 +36,122 @@ pub const SERVICE: &str = "busbar";
 /// The record fields that become span attributes, in the order they are written.
 pub const ATTRIBUTES: [&str; 6] = ["pool", "ingress", "op", "lane", "provider", "model"];
 /// `SPAN_KIND_INTERNAL`.
-const SPAN_KIND_INTERNAL: u64 = 1;
+const SPAN_KIND_INTERNAL: i32 = 1;
 
-/// Protobuf wire types.
-const VARINT: u32 = 0;
-const FIXED64: u32 = 1;
-const LEN: u32 = 2;
+/// `ExportTraceServiceRequest` (collector/trace/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct ExportTraceServiceRequest {
+    #[prost(message, repeated, tag = "1")]
+    resource_spans: Vec<ResourceSpans>,
+}
+
+/// `ResourceSpans` (trace/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct ResourceSpans {
+    #[prost(message, optional, tag = "1")]
+    resource: Option<Resource>,
+    #[prost(message, repeated, tag = "2")]
+    scope_spans: Vec<ScopeSpans>,
+}
+
+/// `Resource` (resource/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct Resource {
+    #[prost(message, repeated, tag = "1")]
+    attributes: Vec<KeyValue>,
+}
+
+/// `ScopeSpans` (trace/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct ScopeSpans {
+    #[prost(message, optional, tag = "1")]
+    scope: Option<InstrumentationScope>,
+    #[prost(message, repeated, tag = "2")]
+    spans: Vec<Span>,
+}
+
+/// `InstrumentationScope` (common/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct InstrumentationScope {
+    #[prost(string, tag = "1")]
+    name: String,
+}
+
+/// `Span` (trace/v1): the fields this sink fills.
+#[derive(Clone, PartialEq, prost::Message)]
+struct Span {
+    #[prost(bytes = "vec", tag = "1")]
+    trace_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    span_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    parent_span_id: Vec<u8>,
+    #[prost(string, tag = "5")]
+    name: String,
+    #[prost(int32, tag = "6")]
+    kind: i32,
+    #[prost(fixed64, tag = "7")]
+    start_time_unix_nano: u64,
+    #[prost(fixed64, tag = "8")]
+    end_time_unix_nano: u64,
+    #[prost(message, repeated, tag = "9")]
+    attributes: Vec<KeyValue>,
+}
+
+/// `KeyValue` (common/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct KeyValue {
+    #[prost(string, tag = "1")]
+    key: String,
+    #[prost(message, optional, tag = "2")]
+    value: Option<AnyValue>,
+}
+
+/// `AnyValue` (common/v1): its `string_value` member, the one this sink writes.
+#[derive(Clone, PartialEq, prost::Message)]
+struct AnyValue {
+    #[prost(oneof = "AnyValueKind", tags = "1")]
+    value: Option<AnyValueKind>,
+}
+
+/// `AnyValue.value`.
+#[derive(Clone, PartialEq, prost::Oneof)]
+enum AnyValueKind {
+    #[prost(string, tag = "1")]
+    StringValue(String),
+}
+
+/// A `KeyValue { key, value: AnyValue { string_value } }`.
+fn key_value(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(AnyValueKind::StringValue(value.to_string())),
+        }),
+    }
+}
 
 /// The encoded `ExportTraceServiceRequest` carrying each of `records` that is a span, in order, or
 /// `None` when none of them carries a usable span identity.
 pub fn export_request<'a>(records: impl IntoIterator<Item = &'a Value>) -> Option<Vec<u8>> {
-    let mut scope = Vec::new();
-    string(&mut scope, 1, SERVICE);
-    let mut scope_spans = Vec::new();
-    message(&mut scope_spans, 1, &scope);
-    let mut spans = 0usize;
-    for span in records.into_iter().filter_map(span) {
-        message(&mut scope_spans, 2, &span);
-        spans += 1;
-    }
-    if spans == 0 {
+    let spans: Vec<Span> = records.into_iter().filter_map(span).collect();
+    if spans.is_empty() {
         return None;
     }
-    let mut resource = Vec::new();
-    message(&mut resource, 1, &key_value("service.name", SERVICE));
-    let mut resource_spans = Vec::new();
-    message(&mut resource_spans, 1, &resource);
-    message(&mut resource_spans, 2, &scope_spans);
-    let mut request = Vec::new();
-    message(&mut request, 1, &resource_spans);
-    Some(request)
+    let request = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![key_value("service.name", SERVICE)],
+            }),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: SERVICE.to_string(),
+                }),
+                spans,
+            }],
+        }],
+    };
+    Some(request.encode_to_vec())
 }
 
 /// Whether `record` carries a usable span identity (it is a span [`export_request`] encodes).
@@ -68,7 +160,7 @@ pub fn is_span(record: &Value) -> bool {
 }
 
 /// The record's `Span` message.
-fn span(record: &Value) -> Option<Vec<u8>> {
+fn span(record: &Value) -> Option<Span> {
     let trace_id = id(record.get("trace_id")?)?;
     let span_id = id(record.get("span_id")?)?;
     let parent = record.get("parent_span_id").and_then(id);
@@ -76,95 +168,38 @@ fn span(record: &Value) -> Option<Vec<u8>> {
     let micros = |key: &str| record.get(key).and_then(Value::as_u64).unwrap_or_default();
     let start = micros("start").saturating_mul(1000);
     let end = start.saturating_add(micros("duration_us").saturating_mul(1000));
-
-    let mut out = Vec::new();
-    let mut trace = [0u8; 16];
+    let mut trace = vec![0u8; 16];
     trace[8..].copy_from_slice(&trace_id);
-    bytes(&mut out, 1, &trace);
-    bytes(&mut out, 2, &span_id);
-    if let Some(parent) = parent {
-        bytes(&mut out, 4, &parent);
-    }
-    string(&mut out, 5, text("name"));
-    varint_field(&mut out, 6, SPAN_KIND_INTERNAL);
-    fixed64(&mut out, 7, start);
-    fixed64(&mut out, 8, end);
-    for key in ATTRIBUTES {
-        let value = match record.get(key) {
-            None | Some(Value::Null) => continue,
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
-        };
-        message(&mut out, 9, &key_value(key, &value));
-    }
-    Some(out)
+    let attributes = ATTRIBUTES
+        .iter()
+        .filter_map(|key| {
+            let value = match record.get(*key) {
+                None | Some(Value::Null) => return None,
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+            };
+            Some(key_value(key, &value))
+        })
+        .collect();
+    Some(Span {
+        trace_id: trace,
+        span_id: span_id.to_vec(),
+        parent_span_id: parent.map(|p| p.to_vec()).unwrap_or_default(),
+        name: text("name").to_string(),
+        kind: SPAN_KIND_INTERNAL,
+        start_time_unix_nano: start,
+        end_time_unix_nano: end,
+        attributes,
+    })
 }
 
 /// A record's span id — 16 hex digits — as its 8 big-endian bytes; `None` when it is not one, or
 /// is zero (the invalid id in OTLP).
 fn id(value: &Value) -> Option<[u8; 8]> {
     let text = value.as_str()?;
-    if text.is_empty() || text.len() > 16 {
+    if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let n = u64::from_str_radix(text, 16).ok().filter(|n| *n != 0)?;
     Some(n.to_be_bytes())
-}
-
-/// A `KeyValue { key, value: AnyValue { string_value } }`.
-fn key_value(key: &str, value: &str) -> Vec<u8> {
-    let mut any = Vec::new();
-    // `AnyValue.value` is a oneof: its member is written even when it is the empty string.
-    tag(&mut any, 1, LEN);
-    varint(&mut any, value.len() as u64);
-    any.extend_from_slice(value.as_bytes());
-    let mut kv = Vec::new();
-    string(&mut kv, 1, key);
-    message(&mut kv, 2, &any);
-    kv
-}
-
-fn tag(out: &mut Vec<u8>, field: u32, wire: u32) {
-    varint(out, u64::from((field << 3) | wire));
-}
-
-fn varint(out: &mut Vec<u8>, mut n: u64) {
-    while n >= 0x80 {
-        out.push((n as u8) | 0x80);
-        n >>= 7;
-    }
-    out.push(n as u8);
-}
-
-fn varint_field(out: &mut Vec<u8>, field: u32, n: u64) {
-    if n != 0 {
-        tag(out, field, VARINT);
-        varint(out, n);
-    }
-}
-
-fn fixed64(out: &mut Vec<u8>, field: u32, n: u64) {
-    if n != 0 {
-        tag(out, field, FIXED64);
-        out.extend_from_slice(&n.to_le_bytes());
-    }
-}
-
-fn bytes(out: &mut Vec<u8>, field: u32, b: &[u8]) {
-    if !b.is_empty() {
-        tag(out, field, LEN);
-        varint(out, b.len() as u64);
-        out.extend_from_slice(b);
-    }
-}
-
-fn string(out: &mut Vec<u8>, field: u32, s: &str) {
-    bytes(out, field, s.as_bytes());
-}
-
-/// An embedded message — written even when empty, as a set message field is.
-fn message(out: &mut Vec<u8>, field: u32, encoded: &[u8]) {
-    tag(out, field, LEN);
-    varint(out, encoded.len() as u64);
-    out.extend_from_slice(encoded);
 }
