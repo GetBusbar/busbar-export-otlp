@@ -383,3 +383,15 @@ fn no_collector_credential_renders_through_debug() {
         );
     }
 }
+
+/// A USERINFO's PERCENT-ESCAPED OCTETS REACH THE COLLECTOR AS THEY ARE (Q128 export-otlp LOW, reader
+/// r91 on a776bd3; RFC 7617: the user-pass is an octet sequence; RFC 3986 percent-escapes encode
+/// octets): `p%FFw` is the bytes `p 0xFF w`, base64ed as written. RED before the fix: the octets
+/// went through a lossy UTF-8 reading, and `0xFF` reached the collector as `EF BF BD`.
+#[test]
+fn a_userinfos_escaped_octets_reach_the_collector_as_they_are() {
+    let (clean, auth) = crate::split_credentials("https://u:p%FFw@collector.example/v1/traces");
+    assert_eq!(clean, "https://collector.example/v1/traces");
+    // base64("u:p\xFFw") = "dTpw/3c=".
+    assert_eq!(auth.as_deref(), Some("Basic dTpw/3c="));
+}
