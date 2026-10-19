@@ -226,7 +226,7 @@ fn the_request_target_is_the_path_and_query() {
 /// EOTLP-1: `from_str_radix` accepts a leading `+`, so `%+4` must stay literal (1.5.5 bytes).
 #[test]
 fn a_plus_after_percent_is_not_an_escape() {
-    assert_eq!(percent_decode("ab%+41cd"), "ab%+41cd");
+    assert_eq!(percent_decode("ab%+41cd"), b"ab%+41cd");
     assert_eq!(
         split_credentials("https://u:ab%+41cd@collector.example/v1").1,
         Some(format!("Basic {}", base64(b"u:ab%+41cd")))
@@ -240,7 +240,7 @@ fn the_small_encoders_match_their_standards() {
     assert_eq!(base64(b"fo"), "Zm8=");
     assert_eq!(base64(b"foo"), "Zm9v");
     assert_eq!(base64(b"user:pass"), "dXNlcjpwYXNz");
-    assert_eq!(percent_decode("a%20b%zz%4"), "a b%zz%4");
+    assert_eq!(percent_decode("a%20b%zz%4"), b"a b%zz%4");
     assert_eq!(
         split_credentials("http://localhost:4318/v1/traces"),
         ("http://localhost:4318/v1/traces".into(), None)
