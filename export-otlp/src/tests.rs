@@ -109,6 +109,38 @@ fn a_root_span_has_no_parent_and_only_its_own_attributes() {
     );
 }
 
+/// AN ATTRIBUTE KEEPS ITS TYPE (busbar status row 173): a record's integer is an `int_value`
+/// (1.5.5's exporter wrote `forward_once`'s `lane = i` so), its boolean a `bool_value`, its float a
+/// `double_value`, each written even at its default; a string stays a `string_value`. RED before the
+/// sink typed them: every value was its text.
+#[test]
+fn an_attribute_keeps_the_type_the_record_states() {
+    let record = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "forward_once",
+        "start": 5, "duration_us": 0, "pool": "p", "ingress": true, "op": 0.5, "lane": 3,
+        "provider": 0, "model": -2,
+    });
+    let bytes = proto::export_request([&record]).expect("a span");
+    let request = decoded(&bytes);
+    let span = &request.resource_spans[0].scope_spans[0].spans[0];
+    let typed = |key: &str, value: any_value::Value| KeyValue {
+        key: key.into(),
+        value: Some(AnyValue { value: Some(value) }),
+        ..Default::default()
+    };
+    assert_eq!(
+        span.attributes,
+        vec![
+            kv("pool", "p"),
+            typed("ingress", any_value::Value::BoolValue(true)),
+            typed("op", any_value::Value::DoubleValue(0.5)),
+            typed("lane", any_value::Value::IntValue(3)),
+            typed("provider", any_value::Value::IntValue(0)),
+            typed("model", any_value::Value::IntValue(-2)),
+        ]
+    );
+}
+
 /// RED ARM: a record without a usable span identity is no span — nothing is encoded.
 #[test]
 fn a_record_without_a_span_identity_encodes_to_nothing() {

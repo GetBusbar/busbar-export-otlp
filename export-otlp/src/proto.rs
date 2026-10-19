@@ -17,7 +17,7 @@
 //! | — | `kind` (6): `SPAN_KIND_INTERNAL` |
 //! | `start` (epoch µs) | `start_time_unix_nano` (7) |
 //! | `start` + `duration_us` | `end_time_unix_nano` (8) |
-//! | `pool` `ingress` `op` `lane` `provider` `model` | `attributes` (9), in that order, string values |
+//! | `pool` `ingress` `op` `lane` `provider` `model` | `attributes` (9), in that order, typed as the record states them: a string a `string_value`, an integer an `int_value`, a boolean a `bool_value`, a float a `double_value` |
 //!
 //! Proto3 rules, as every conforming encoder writes them: fields in field-number order, a field at
 //! its default (empty, zero) left off, a `oneof` member written whenever it is set. A record with no
@@ -92,10 +92,9 @@ fn span(record: &Value) -> Option<Vec<u8>> {
     for key in ATTRIBUTES {
         let value = match record.get(key) {
             None | Some(Value::Null) => continue,
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
+            Some(value) => any_value(value),
         };
-        message(&mut out, 9, &key_value(key, &value));
+        message(&mut out, 9, &key_value_any(key, &value));
     }
     Some(out)
 }
@@ -113,15 +112,55 @@ fn id(value: &Value) -> Option<[u8; 8]> {
 
 /// A `KeyValue { key, value: AnyValue { string_value } }`.
 fn key_value(key: &str, value: &str) -> Vec<u8> {
-    let mut any = Vec::new();
-    // `AnyValue.value` is a oneof: its member is written even when it is the empty string.
-    tag(&mut any, 1, LEN);
-    varint(&mut any, value.len() as u64);
-    any.extend_from_slice(value.as_bytes());
+    key_value_any(key, &any_value(&Value::from(value)))
+}
+
+/// A `KeyValue { key, value }` over an encoded `AnyValue`.
+fn key_value_any(key: &str, any: &[u8]) -> Vec<u8> {
     let mut kv = Vec::new();
     string(&mut kv, 1, key);
-    message(&mut kv, 2, &any);
+    message(&mut kv, 2, any);
     kv
+}
+
+/// A record value as its `AnyValue`, typed as the record states it (as the previous release's
+/// exporter typed a span's fields): a string its `string_value` (1), a boolean its `bool_value`
+/// (2), an integer its `int_value` (3, an `int64`), any other number its `double_value` (4); an
+/// array or object its JSON text. `AnyValue.value` is a oneof: its member is written even at its
+/// default (the empty string, `false`, `0`).
+fn any_value(value: &Value) -> Vec<u8> {
+    let mut any = Vec::new();
+    match value {
+        Value::Bool(b) => {
+            tag(&mut any, 2, VARINT);
+            varint(&mut any, u64::from(*b));
+        }
+        Value::Number(n) if n.as_i64().is_some() || n.as_u64().is_some() => {
+            // An `int64` on the wire is its two's-complement bits as a varint; a `u64` past
+            // `i64::MAX` keeps its bits.
+            let bits = n
+                .as_i64()
+                .map_or_else(|| n.as_u64().unwrap_or_default(), |i| i as u64);
+            tag(&mut any, 3, VARINT);
+            varint(&mut any, bits);
+        }
+        Value::Number(n) => {
+            tag(&mut any, 4, FIXED64);
+            any.extend_from_slice(&n.as_f64().unwrap_or_default().to_bits().to_le_bytes());
+        }
+        Value::String(s) => {
+            tag(&mut any, 1, LEN);
+            varint(&mut any, s.len() as u64);
+            any.extend_from_slice(s.as_bytes());
+        }
+        other => {
+            let text = other.to_string();
+            tag(&mut any, 1, LEN);
+            varint(&mut any, text.len() as u64);
+            any.extend_from_slice(text.as_bytes());
+        }
+    }
+    any
 }
 
 fn tag(out: &mut Vec<u8>, field: u32, wire: u32) {
