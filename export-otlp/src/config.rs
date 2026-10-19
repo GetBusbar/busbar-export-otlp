@@ -8,13 +8,22 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `settings:` of an `export.<name>.module: otlp` instance.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+/// `settings:` of an `export.<name>.module: otlp` instance. Its `Debug` masks the url's userinfo
+/// (the collector's Basic credential), as every line the sink writes masks it.
+#[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpSettings {
     /// OTLP/HTTP traces endpoint URL (e.g. `http://localhost:4318/v1/traces`) — REQUIRED. When an
     /// `otlp` export instance is present busbar exports its spans there.
     pub url: String,
+}
+
+impl std::fmt::Debug for OtlpSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpSettings")
+            .field("url", &crate::mask_userinfo(&self.url))
+            .finish()
+    }
 }
 
 impl OtlpSettings {

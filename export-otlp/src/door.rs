@@ -89,8 +89,9 @@ pub const STATEMENT: Statement = Statement {
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
 
-/// Where each export goes, as one instance's settings name it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
+/// the `Authorization` the url's userinfo became is redacted.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Endpoint {
     /// The settings' URL, userinfo masked: what every line names.
     pub shown: String,
@@ -100,6 +101,20 @@ pub struct Endpoint {
     /// The request target (path and query) and the `Authorization` the userinfo became; `None`
     /// when the settings did not parse.
     pub target: Option<(String, Option<String>)>,
+}
+
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let target = self
+            .target
+            .as_ref()
+            .map(|(path, authorization)| (path, authorization.as_ref().map(|_| "<redacted>")));
+        f.debug_struct("Endpoint")
+            .field("shown", &self.shown)
+            .field("collector", &self.collector)
+            .field("target", &target)
+            .finish()
+    }
 }
 
 impl Endpoint {
