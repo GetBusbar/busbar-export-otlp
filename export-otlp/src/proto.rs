@@ -2,8 +2,14 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE `traces` BATCH → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
-//! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded here by hand:
-//! the handful of messages it takes do not justify a code generator in the binary.
+//! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded here by hand.
+//! WHY NOT THE PUBLISHER'S TYPES, concretely: `opentelemetry-proto` 0.32 depends on `opentelemetry`
+//! and `opentelemetry_sdk` unconditionally (its `trace` feature, which the trace messages need,
+//! turns on `opentelemetry_sdk/trace`), so encoding through it would link the OpenTelemetry SDK, a
+//! tracer runtime this sink does not run, into the shipped plugin to write eight message types.
+//! The publisher's types stay the ORACLE instead: every request the suite builds is decoded with
+//! `opentelemetry-proto` + `prost` (dev-dependencies) and compared field by field
+//! (`tests::a_traces_record_is_one_otlp_span_every_field_in_its_place` and the cells beside it).
 //!
 //! The request is `resource_spans[1]`: `resource.attributes = [service.name = "busbar"]`, one
 //! `scope_spans` whose `scope.name` is `busbar`, and one `Span` per record, in batch order:
