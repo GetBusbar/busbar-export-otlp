@@ -395,3 +395,27 @@ fn a_userinfos_escaped_octets_reach_the_collector_as_they_are() {
     // base64("u:p\xFFw") = "dTpw/3c=".
     assert_eq!(auth.as_deref(), Some("Basic dTpw/3c="));
 }
+
+/// A URL THAT DOES NOT PARSE STILL KEEPS ITS USERINFO OUT OF EVERY LINE AND THE DIAL TARGET (Q128
+/// export-otlp LOW, reader r131 on d26b358): 1.5.5 accepted any string as the url, so one that
+/// carries `user:pass` but fails to parse (an out-of-range port) is masked by cutting at the
+/// authority's last `@`, in the lines, in `Debug` and in the collector handed to the host. RED
+/// before the fix: the password rode all three.
+#[test]
+fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
+    let url = "https://ops:hunter2@collector.example:99999/v1/traces";
+    assert!(url::Url::parse(url).is_err(), "the fixture does not parse");
+    assert_eq!(
+        crate::mask_userinfo(url),
+        "https://***@collector.example:99999/v1/traces"
+    );
+    let (collector, auth) = crate::split_credentials(url);
+    assert!(!collector.contains("hunter2"), "{collector}");
+    assert_eq!(auth, None);
+    let raw = format!(r#"{{"url":"{url}"}}"#);
+    let endpoint = crate::door::Endpoint::of(raw.as_bytes());
+    let settings = crate::config::OtlpSettings::parse(raw.as_bytes()).expect("parses");
+    for text in [format!("{endpoint:?}"), format!("{settings:?}")] {
+        assert!(!text.contains("hunter2"), "{text}");
+    }
+}
