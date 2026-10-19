@@ -83,8 +83,8 @@ pub const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
-    // At most one instance: busbar refuses a second `module: otlp` sink while it resolves its
-    // configuration (the host owns that refusal, in 1.5.x's words), and this mark states it.
+    // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
+    // refusal of a second `module: otlp` sink in 1.5.5's text (`crate::check_limits`).
     marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
@@ -200,7 +200,7 @@ impl Otlp {
             Ok(reply) => tracing::debug!(
                 endpoint = %shown,
                 status = reply.status,
-                "OTLP span export returned a non-2xx status; this span was dropped"
+                "OTLP span export returned a non-2xx status; this batch was dropped"
             ),
             Err(e) => dropped(shown, e),
         }
@@ -310,7 +310,7 @@ fn dropped(shown: &str, error: &ConnFailure) {
     tracing::debug!(
         endpoint = %shown,
         error = %error,
-        "OTLP span export failed; this span was dropped"
+        "OTLP span export failed; this batch was dropped"
     );
 }
 

@@ -101,9 +101,12 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     if username.is_empty() && password.is_none() {
         return (endpoint.to_string(), None);
     }
-    let user = percent_decode(&username);
-    let pass = percent_decode(password.as_deref().unwrap_or(""));
-    let token = base64(format!("{user}:{pass}").as_bytes());
+    // The user-pass is an octet sequence (RFC 7617), and a userinfo escape encodes an octet (RFC
+    // 3986): the decoded bytes are base64ed as they are, never read as text first.
+    let mut user_pass = percent_decode(&username);
+    user_pass.push(b':');
+    user_pass.extend(percent_decode(password.as_deref().unwrap_or("")));
+    let token = base64(&user_pass);
     let clean = if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
         let host = parsed.host_str().unwrap_or("");
         match parsed.port() {
@@ -128,8 +131,9 @@ pub fn request_target(endpoint: &str) -> String {
     }
 }
 
-/// Percent-decode a URL userinfo component (`%XX` → the byte; anything else as written).
-fn percent_decode(s: &str) -> String {
+/// Percent-decode a URL userinfo component to its octets (`%XX` → the byte; anything else as
+/// written).
+fn percent_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -152,7 +156,7 @@ fn percent_decode(s: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// Standard base64 (RFC 4648 §4, `=`-padded).
