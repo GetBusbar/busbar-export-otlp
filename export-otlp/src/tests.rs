@@ -119,6 +119,10 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
         json!({"trace_id": "not-hex", "span_id": "0000000000000001"}),
         json!({"trace_id": "00000000000000001", "span_id": "0000000000000001"}),
         json!({"trace_id": 1, "span_id": "0000000000000001"}),
+        // Not EXACTLY 16 hex digits (Q128 export-otlp NIT, reader r61): short, and a leading `+`.
+        json!({"trace_id": "2a", "span_id": "0000000000000001"}),
+        json!({"trace_id": "0000000000000001", "span_id": "ff"}),
+        json!({"trace_id": "+00000000000002a", "span_id": "0000000000000001"}),
     ] {
         assert_eq!(proto::export_request([&record]), None, "{record}");
     }
