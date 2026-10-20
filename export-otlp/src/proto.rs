@@ -22,7 +22,7 @@
 //! | — | `kind` (6): `SPAN_KIND_INTERNAL` |
 //! | `start` (epoch µs) | `start_time_unix_nano` (7) |
 //! | `start` + `duration_us` | `end_time_unix_nano` (8) |
-//! | `pool` `ingress` `op` `lane` `provider` `model` | `attributes` (9), in that order, string values |
+//! | `pool` `ingress` `op` `lane` `provider` `model` | `attributes` (9), in that order, typed as the record states them: a string a `string_value`, an integer an `int_value`, a boolean a `bool_value`, a float a `double_value` |
 //!
 //! Proto3 rules, as every conforming encoder writes them: fields in field-number order, a field at
 //! its default (empty, zero) left off, a `oneof` member written whenever it is set. A record with no
@@ -107,27 +107,54 @@ struct KeyValue {
     value: Option<AnyValue>,
 }
 
-/// `AnyValue` (common/v1): its `string_value` member, the one this sink writes.
+/// `AnyValue` (common/v1): its `string_value`, `bool_value`, `int_value` and `double_value`
+/// members, the ones this sink writes.
 #[derive(Clone, PartialEq, prost::Message)]
 struct AnyValue {
-    #[prost(oneof = "AnyValueKind", tags = "1")]
+    #[prost(oneof = "AnyValueKind", tags = "1, 2, 3, 4")]
     value: Option<AnyValueKind>,
 }
 
-/// `AnyValue.value`.
+/// `AnyValue.value`: `string_value` (1), `bool_value` (2), `int_value` (3), `double_value` (4).
 #[derive(Clone, PartialEq, prost::Oneof)]
 enum AnyValueKind {
     #[prost(string, tag = "1")]
-    StringValue(String),
+    Text(String),
+    #[prost(bool, tag = "2")]
+    Bool(bool),
+    #[prost(int64, tag = "3")]
+    Int(i64),
+    #[prost(double, tag = "4")]
+    Double(f64),
 }
 
 /// A `KeyValue { key, value: AnyValue { string_value } }`.
 fn key_value(key: &str, value: &str) -> KeyValue {
+    key_value_of(key, AnyValueKind::Text(value.to_string()))
+}
+
+/// A `KeyValue { key, value: AnyValue { value } }`.
+fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
     KeyValue {
         key: key.to_string(),
-        value: Some(AnyValue {
-            value: Some(AnyValueKind::StringValue(value.to_string())),
-        }),
+        value: Some(AnyValue { value: Some(value) }),
+    }
+}
+
+/// A record value as its `AnyValue` member, typed as the record states it (as the previous
+/// release's exporter typed a span's fields): a string its `string_value`, a boolean its
+/// `bool_value`, an integer its `int_value` (a `u64` past `i64::MAX` keeps its bits), any other
+/// number its `double_value`; an array or object its JSON text.
+fn any_value(value: &Value) -> AnyValueKind {
+    match value {
+        Value::String(s) => AnyValueKind::Text(s.clone()),
+        Value::Bool(b) => AnyValueKind::Bool(*b),
+        Value::Number(n) => match (n.as_i64(), n.as_u64()) {
+            (Some(i), _) => AnyValueKind::Int(i),
+            (None, Some(u)) => AnyValueKind::Int(u as i64),
+            (None, None) => AnyValueKind::Double(n.as_f64().unwrap_or_default()),
+        },
+        other => AnyValueKind::Text(other.to_string()),
     }
 }
 
@@ -172,13 +199,9 @@ fn span(record: &Value) -> Option<Span> {
     trace[8..].copy_from_slice(&trace_id);
     let attributes = ATTRIBUTES
         .iter()
-        .filter_map(|key| {
-            let value = match record.get(*key) {
-                None | Some(Value::Null) => return None,
-                Some(Value::String(s)) => s.clone(),
-                Some(other) => other.to_string(),
-            };
-            Some(key_value(key, &value))
+        .filter_map(|key| match record.get(*key) {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(key_value_of(key, any_value(value))),
         })
         .collect();
     Some(Span {
