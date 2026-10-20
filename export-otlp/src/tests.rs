@@ -141,6 +141,87 @@ fn an_attribute_keeps_the_type_the_record_states() {
     );
 }
 
+/// THE FULL SPAN RECORD (busbar status row 173): a line carrying the host's `span` member is
+/// encoded from it alone: its ns start and end, its attributes in its order and types (an array an
+/// `array_value`), its events and its status, whatever projected fields the line also carries.
+/// RED before the sink read it: the span was the projected fields' (µs times, string attributes,
+/// no events, no status).
+#[test]
+fn a_full_span_record_is_the_span() {
+    use opentelemetry_proto::tonic::common::v1::ArrayValue;
+    use opentelemetry_proto::tonic::trace::v1::{span::Event, status::StatusCode, Status};
+    let record = json!({
+        "trace_id": "0000000000000001", "span_id": "0000000000000002", "name": "projected",
+        "start": 1, "duration_us": 1, "pool": "projected",
+        "span": {
+            "trace_id": "0000000000000007", "span_id": "0000000000000008",
+            "parent_span_id": "0000000000000007", "name": "forward",
+            "start_ns": 1_000_000_123u64, "end_ns": 1_000_000_456u64,
+            "attributes": [
+                {"key": "thread.id", "value": 3},
+                {"key": "target", "value": "busbar::proxy::engine"},
+                {"key": "request_id", "value": "7"},
+                {"key": "e.chain", "value": ["a", "b"]},
+                {"key": "busy_ns", "value": 0}
+            ],
+            "events": [
+                {"name": "broke", "time_ns": 1_000_000_200u64,
+                 "attributes": [{"key": "level", "value": "ERROR"}]}
+            ],
+            "status": {"code": "error", "message": "boom"}
+        }
+    });
+    let bytes = proto::export_request([&record]).expect("a span");
+    let request = decoded(&bytes);
+    let span = &request.resource_spans[0].scope_spans[0].spans[0];
+    let typed = |key: &str, value: any_value::Value| KeyValue {
+        key: key.into(),
+        value: Some(AnyValue { value: Some(value) }),
+        ..Default::default()
+    };
+    let text = |s: &str| AnyValue {
+        value: Some(any_value::Value::StringValue(s.into())),
+    };
+    assert_eq!(span.name, "forward");
+    assert_eq!(span.span_id, vec![0, 0, 0, 0, 0, 0, 0, 8]);
+    assert_eq!(span.parent_span_id, vec![0, 0, 0, 0, 0, 0, 0, 7]);
+    assert_eq!(
+        (span.start_time_unix_nano, span.end_time_unix_nano),
+        (1_000_000_123, 1_000_000_456)
+    );
+    assert_eq!(
+        span.attributes,
+        vec![
+            typed("thread.id", any_value::Value::IntValue(3)),
+            kv("target", "busbar::proxy::engine"),
+            kv("request_id", "7"),
+            typed(
+                "e.chain",
+                any_value::Value::ArrayValue(ArrayValue {
+                    values: vec![text("a"), text("b")],
+                }),
+            ),
+            typed("busy_ns", any_value::Value::IntValue(0)),
+        ]
+    );
+    assert_eq!(
+        span.events,
+        vec![Event {
+            time_unix_nano: 1_000_000_200,
+            name: "broke".into(),
+            attributes: vec![kv("level", "ERROR")],
+            ..Default::default()
+        }]
+    );
+    assert_eq!(
+        span.status,
+        Some(Status {
+            message: "boom".into(),
+            code: StatusCode::Error as i32,
+        })
+    );
+}
+
 /// RED ARM: a record without a usable span identity is no span — nothing is encoded.
 #[test]
 fn a_record_without_a_span_identity_encodes_to_nothing() {
