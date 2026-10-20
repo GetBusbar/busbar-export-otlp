@@ -115,22 +115,22 @@ struct AnyValue {
     value: Option<AnyValueKind>,
 }
 
-/// `AnyValue.value`.
+/// `AnyValue.value`: `string_value` (1), `bool_value` (2), `int_value` (3), `double_value` (4).
 #[derive(Clone, PartialEq, prost::Oneof)]
 enum AnyValueKind {
     #[prost(string, tag = "1")]
-    StringValue(String),
+    Text(String),
     #[prost(bool, tag = "2")]
-    BoolValue(bool),
+    Bool(bool),
     #[prost(int64, tag = "3")]
-    IntValue(i64),
+    Int(i64),
     #[prost(double, tag = "4")]
-    DoubleValue(f64),
+    Double(f64),
 }
 
 /// A `KeyValue { key, value: AnyValue { string_value } }`.
 fn key_value(key: &str, value: &str) -> KeyValue {
-    key_value_of(key, AnyValueKind::StringValue(value.to_string()))
+    key_value_of(key, AnyValueKind::Text(value.to_string()))
 }
 
 /// A `KeyValue { key, value: AnyValue { value } }`.
@@ -147,14 +147,14 @@ fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
 /// number its `double_value`; an array or object its JSON text.
 fn any_value(value: &Value) -> AnyValueKind {
     match value {
-        Value::String(s) => AnyValueKind::StringValue(s.clone()),
-        Value::Bool(b) => AnyValueKind::BoolValue(*b),
+        Value::String(s) => AnyValueKind::Text(s.clone()),
+        Value::Bool(b) => AnyValueKind::Bool(*b),
         Value::Number(n) => match (n.as_i64(), n.as_u64()) {
-            (Some(i), _) => AnyValueKind::IntValue(i),
-            (None, Some(u)) => AnyValueKind::IntValue(u as i64),
-            (None, None) => AnyValueKind::DoubleValue(n.as_f64().unwrap_or_default()),
+            (Some(i), _) => AnyValueKind::Int(i),
+            (None, Some(u)) => AnyValueKind::Int(u as i64),
+            (None, None) => AnyValueKind::Double(n.as_f64().unwrap_or_default()),
         },
-        other => AnyValueKind::StringValue(other.to_string()),
+        other => AnyValueKind::Text(other.to_string()),
     }
 }
 
