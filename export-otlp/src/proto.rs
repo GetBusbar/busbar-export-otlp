@@ -67,8 +67,12 @@ pub fn is_span(record: &Value) -> bool {
     span(record).is_some()
 }
 
-/// The record's `Span` message.
+/// The record's `Span` message: from its full span record where the host handed one (its `span`
+/// member, [`full_span`]), else from its projected fields.
 fn span(record: &Value) -> Option<Vec<u8>> {
+    if let Some(full) = record.get(SPAN_MEMBER).filter(|v| v.is_object()) {
+        return full_span(full);
+    }
     let trace_id = id(record.get("trace_id")?)?;
     let span_id = id(record.get("span_id")?)?;
     let parent = record.get("parent_span_id").and_then(id);
@@ -99,6 +103,102 @@ fn span(record: &Value) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The reserved member of a `traces` line carrying the full span record (the host hands it to a
+/// sink that takes span records).
+pub const SPAN_MEMBER: &str = "span";
+
+/// `Status.code` `STATUS_CODE_ERROR`.
+const STATUS_CODE_ERROR: u64 = 2;
+
+/// THE FULL SPAN RECORD as its `Span` (busbar status row 173): its ids and name, its start and end
+/// in nanoseconds, its attributes in the order and types the host states them (an array an
+/// `array_value`), its events (each its time, name and attributes), and its status (an error with
+/// its message; unset the empty status). Everything the previous release's exporter sent for a span,
+/// whatever `fields:` selected.
+fn full_span(full: &Value) -> Option<Vec<u8>> {
+    let trace_id = id(full.get("trace_id")?)?;
+    let span_id = id(full.get("span_id")?)?;
+    let parent = full.get("parent_span_id").and_then(id);
+    let ns = |key: &str| full.get(key).and_then(Value::as_u64).unwrap_or_default();
+    let mut out = Vec::new();
+    let mut trace = [0u8; 16];
+    trace[8..].copy_from_slice(&trace_id);
+    bytes(&mut out, 1, &trace);
+    bytes(&mut out, 2, &span_id);
+    if let Some(parent) = parent {
+        bytes(&mut out, 4, &parent);
+    }
+    string(
+        &mut out,
+        5,
+        full.get("name").and_then(Value::as_str).unwrap_or_default(),
+    );
+    varint_field(&mut out, 6, SPAN_KIND_INTERNAL);
+    fixed64(&mut out, 7, ns("start_ns"));
+    fixed64(&mut out, 8, ns("end_ns"));
+    for kv in key_values(full.get("attributes")) {
+        message(&mut out, 9, &kv);
+    }
+    for event in full
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let mut e = Vec::new();
+        fixed64(
+            &mut e,
+            1,
+            event
+                .get("time_ns")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+        );
+        string(
+            &mut e,
+            2,
+            event
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        for kv in key_values(event.get("attributes")) {
+            message(&mut e, 3, &kv);
+        }
+        message(&mut out, 11, &e);
+    }
+    // The status is always set, as the previous release's exporter set it: unset is the empty
+    // message; an error carries its message and `STATUS_CODE_ERROR`.
+    let status = full.get("status");
+    let mut st = Vec::new();
+    if status.and_then(|s| s.get("code")).and_then(Value::as_str) == Some("error") {
+        string(
+            &mut st,
+            2,
+            status
+                .and_then(|s| s.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        varint_field(&mut st, 3, STATUS_CODE_ERROR);
+    }
+    message(&mut out, 15, &st);
+    Some(out)
+}
+
+/// `[{key, value}, …]` as encoded `KeyValue`s, in order.
+fn key_values(list: Option<&Value>) -> Vec<Vec<u8>> {
+    list.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|kv| {
+            let key = kv.get("key")?.as_str()?;
+            let value = kv.get("value")?;
+            Some(key_value_any(key, &any_value(value)))
+        })
+        .collect()
+}
+
 /// A record's span id — 16 hex digits — as its 8 big-endian bytes; `None` when it is not one, or
 /// is zero (the invalid id in OTLP).
 fn id(value: &Value) -> Option<[u8; 8]> {
@@ -125,9 +225,9 @@ fn key_value_any(key: &str, any: &[u8]) -> Vec<u8> {
 
 /// A record value as its `AnyValue`, typed as the record states it (as the previous release's
 /// exporter typed a span's fields): a string its `string_value` (1), a boolean its `bool_value`
-/// (2), an integer its `int_value` (3, an `int64`), any other number its `double_value` (4); an
-/// array or object its JSON text. `AnyValue.value` is a oneof: its member is written even at its
-/// default (the empty string, `false`, `0`).
+/// (2), an integer its `int_value` (3, an `int64`), any other number its `double_value` (4), an
+/// array its `array_value` (5); an object its JSON text. `AnyValue.value` is a oneof: its member is
+/// written even at its default (the empty string, `false`, `0`).
 fn any_value(value: &Value) -> Vec<u8> {
     let mut any = Vec::new();
     match value {
@@ -152,6 +252,14 @@ fn any_value(value: &Value) -> Vec<u8> {
             tag(&mut any, 1, LEN);
             varint(&mut any, s.len() as u64);
             any.extend_from_slice(s.as_bytes());
+        }
+        Value::Array(items) => {
+            // `array_value` (5): an `ArrayValue { values: repeated AnyValue }`.
+            let mut array = Vec::new();
+            for item in items {
+                message(&mut array, 1, &any_value(item));
+            }
+            message(&mut any, 5, &array);
         }
         other => {
             let text = other.to_string();
