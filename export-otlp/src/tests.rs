@@ -460,7 +460,7 @@ fn the_statement_marks_one_instance() {
 fn the_need_is_pinned_to_the_url_setting() {
     assert_eq!(door::NEEDS.len(), 1);
     assert_eq!(
-        door::NEEDS[0].target_from.len,
+        door::NEEDS[0].target_from.len(),
         "settings.url".len(),
         "the collector need names no configured target"
     );

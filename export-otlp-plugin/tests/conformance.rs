@@ -85,7 +85,7 @@ fn cdylib() -> PathBuf {
 
 /// The row a busbar build that links the sink states.
 fn row() -> LinkedRow {
-    LinkedRow::of(busbar_export_otlp::door::door).expect("the linked door renders")
+    LinkedRow::of_macro(busbar_export_otlp::door::MACRO_DOOR).expect("the linked door renders")
 }
 
 // ── the host's stand-ins ─────────────────────────────────────────────────────────────────────────
@@ -319,11 +319,10 @@ fn load(host: &Host, dropped: bool) -> Plugin<Export> {
 // ── the script ───────────────────────────────────────────────────────────────────────────────────
 
 fn blob(bytes: &[u8], fmt: u32) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt,
-        flags: 0,
+    // SAFETY: test-owned bytes, borrowed as the plain `Blob { ptr, len, .. }` literal borrowed them: the callers keep them alive for the call that reads the blob.
+    #[allow(unused_unsafe)]
+    unsafe {
+        Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), fmt, 0)
     }
 }
 
@@ -774,7 +773,7 @@ fn suite_host(
 }
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_export_otlp::door::door,
+    door: busbar_export_otlp::door::MACRO_DOOR,
     cdylib: "busbar_export_otlp_plugin",
     inputs: include_str!("conformance.json"),
     host: suite_host,
