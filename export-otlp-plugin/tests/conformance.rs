@@ -5,7 +5,7 @@
 //! the export kind's memory ABI (THE DESIGN §11.4), run against the busbar rev this repo pins
 //! (`.busbar-ref`).
 //!
-//! The sink is held two ways at once: LINKED (the logic crate's `door::door`, through the loader's
+//! The sink is held two ways at once: LINKED (the logic crate's `door`, through the loader's
 //! `load_linked`) and DROPPED IN (this crate's built cdylib, `dlopen`ed by the loader's
 //! `load_dropped`, which resolves `busbar_plugin_door` and compares its Statement with the linked
 //! row's, byte for byte). Each is bound to a real dispatcher and to a stand-in for the host's
@@ -28,7 +28,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use busbar_contract::abi::export::{
     self, CheckIn, CheckOut, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn, ServeOut,
@@ -53,8 +53,8 @@ use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::kinds::secret::Secret;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, ConnTable, Diagnostic,
-    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin,
-    NO_BLOB,
+    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, LoadedDoor,
+    Metric, Plugin, NO_BLOB,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use prost::Message as _;
@@ -83,9 +83,16 @@ fn cdylib() -> PathBuf {
         .unwrap_or_else(|| panic!("the busbar-export-otlp-plugin cdylib ({file}) is not built"))
 }
 
+/// This crate's own door, as the loader names a compiled-in one.
+#[allow(unused_unsafe)]
+fn loaded() -> LoadedDoor {
+    // SAFETY: `door` is this crate's own `plugin_door!` entry.
+    unsafe { LoadedDoor::from_raw(busbar_export_otlp::door) }
+}
+
 /// The row a busbar build that links the sink states.
 fn row() -> LinkedRow {
-    LinkedRow::of(busbar_export_otlp::door::door).expect("the linked door renders")
+    LinkedRow::of_loaded(loaded()).expect("the linked door renders")
 }
 
 // ── the host's stand-ins ─────────────────────────────────────────────────────────────────────────
@@ -102,6 +109,10 @@ struct Collector {
     declared: Mutex<HashMap<(InstanceId, NeedId), Declared>>,
     carried: Mutex<Vec<Value>>,
     replies: Mutex<HashMap<ConnId, VecDeque<Piece>>>,
+    /// While set, every read pends with its wake recorded in `held`: an export held in flight.
+    hold: Mutex<bool>,
+    /// The wakes the held reads registered, as `(caller, wake number)`.
+    held: Mutex<Vec<(InstanceId, u64)>>,
 }
 
 /// The egress verdict on `target` under `class`.
@@ -229,8 +240,18 @@ impl Conns for Collector {
         Ok(b.len())
     }
 
-    fn read(&self, c: InstanceId, id: ConnId, _: u64, _: &mut [u8]) -> Result<Piece, ConnError> {
+    fn read(
+        &self,
+        c: InstanceId,
+        id: ConnId,
+        ticket: u64,
+        _: &mut [u8],
+    ) -> Result<Piece, ConnError> {
         self.slab.get(c, id)?;
+        if *self.hold.lock().unwrap() {
+            self.held.lock().unwrap().push((c, ticket));
+            return Err(ConnError::Pending);
+        }
         self.replies
             .lock()
             .unwrap()
@@ -319,11 +340,10 @@ fn load(host: &Host, dropped: bool) -> Plugin<Export> {
 // ── the script ───────────────────────────────────────────────────────────────────────────────────
 
 fn blob(bytes: &[u8], fmt: u32) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt,
-        flags: 0,
+    // SAFETY: test-owned bytes, borrowed as the plain `Blob { ptr, len, .. }` literal borrowed them: the callers keep them alive for the call that reads the blob.
+    #[allow(unused_unsafe)]
+    unsafe {
+        Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), fmt, 0)
     }
 }
 
@@ -697,6 +717,109 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     );
 }
 
+/// RED: AN EXPORT IN FLIGHT ACROSS A RELOAD SETTLES NOTHING FOR THE RELOADED RUN. An export is
+/// issued to the reachable collector and held in flight; the instance is reloaded onto a target the
+/// connector refuses; the held export is then answered 200. That answer belongs to the run it was
+/// issued under: the sink never says `OTLP tracing enabled` for the reloaded endpoint, which nothing
+/// reached, and the reloaded run's own first answer (the connector's refusal) disables it in the
+/// error line its spec states, after which no batch is offered. Before the fix the held export
+/// read the reloaded endpoint and settled the reloaded run: it logged `OTLP tracing enabled` for
+/// the refused target and marked the run admitted, so the refusal never disabled it and every
+/// later batch was offered and dropped at debug.
+#[test]
+fn an_export_in_flight_across_a_reload_does_not_settle_the_reloaded_run() {
+    for dropped in [false, true] {
+        let host = Host::new();
+        let p = load(&host, dropped);
+        assert_eq!(open(&p, COLLECTOR), "Ready ");
+
+        *host.collector.hold.lock().unwrap() = true;
+        let batch = jsonl(&[record("0000000000000031", None)]);
+        let mut input: DeliverIn = blank_in();
+        input.head = in_head();
+        input.stream = ExportStream::Traces as u8;
+        input.batch = blob(&batch, BLOB_JSONL);
+        let ticket = host.d.mint(0).expect("a ticket");
+        let reply = host.d.submit(
+            &p,
+            ticket,
+            export::slot::DELIVER,
+            Frame::new(input, out_head()),
+            DeadlineClass::WriteBehind,
+            now_ns() + 10_000_000_000,
+        );
+        let started = Instant::now();
+        while host.collector.held.lock().unwrap().is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the export never went in flight"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(refresh(&p, INTERNAL), "Ready ");
+
+        *host.collector.hold.lock().unwrap() = false;
+        let wakes = std::mem::take(&mut *host.collector.held.lock().unwrap());
+        for (owner, n) in wakes {
+            (host.d.conn_waker())(owner, n);
+        }
+        let done = reply
+            .wait(Duration::from_secs(10))
+            .expect("the held export completes");
+        host.d.recycle(ticket);
+        drop(batch);
+        assert_eq!(format!("{:?}", done.outcome), "Ready");
+
+        let after = [
+            deliver(&host, &p, &[record("0000000000000032", None)]),
+            deliver(&host, &p, &[record("0000000000000033", None)]),
+        ];
+        assert_eq!(after, ["Ready ", "Ready "]);
+        assert_eq!(close(&p), "Ready ");
+
+        let carried = host.collector.carried.lock().unwrap().clone();
+        assert_eq!(
+            carried.len(),
+            1,
+            "only the held export was carried: {carried:?}"
+        );
+        assert_eq!(carried[0]["target"], "http://127.0.0.1:4318/v1/traces");
+        assert_eq!(carried[0]["head_target"], "/v1/traces");
+
+        let lines = host.lines.0.lock().unwrap().clone();
+        let all = lines.join("\n");
+        let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
+        assert_eq!(
+            count("OTLP tracing enabled endpoint=https://collector.internal.example"),
+            0,
+            "the reloaded endpoint was announced though nothing reached it: {all}"
+        );
+        assert_eq!(
+            count("OTLP tracing enabled"),
+            0,
+            "the held export settled a run: {all}"
+        );
+        assert_eq!(
+            count("; disabling OTLP trace export"),
+            1,
+            "the reloaded run's refusal did not disable it: {all}"
+        );
+        assert!(
+            lines
+                .iter()
+                .filter(|l| l.contains("disabling"))
+                .all(|l| l.starts_with("2 ")),
+            "a refusal is an error line: {all}"
+        );
+        assert_eq!(
+            count("OTLP span export failed"),
+            0,
+            "a batch was offered to the refused target after its refusal: {all}"
+        );
+    }
+}
+
 /// RED: the door asked for as another kind is refused, by either origin, before any slot runs.
 #[test]
 fn a_wrong_kind_is_refused() {
@@ -733,7 +856,7 @@ fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
 // ── THE PUBLISHED CONFORMANCE SUITE ─────────────────────────────────────────────────────────────
 //
 // busbar's suite, at the commit this repo pins (`.busbar-ref`), drives the OTLP sink two ways
-// through the one loader: LINKED (the logic crate's `door::door`) and DROPPED IN (this crate's
+// through the one loader: LINKED (the logic crate's `door`) and DROPPED IN (this crate's
 // built cdylib), over the export kind's script with the inputs in `conformance.json` (refused
 // settings in the grammar's words, a `traces` delivery that DIALS the collector, status and check,
 // a route-less `serve` refused; the sink carries no metrics, so no scrape); every step's crossings
@@ -774,7 +897,7 @@ fn suite_host(
 }
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_export_otlp::door::door,
+    loaded: loaded(),
     cdylib: "busbar_export_otlp_plugin",
     inputs: include_str!("conformance.json"),
     host: suite_host,

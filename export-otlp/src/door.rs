@@ -10,11 +10,13 @@
 //! * `deliver` — the batch's spans as one OTLP request, sent by `exchange()` over the declared need,
 //!   PENDING while the host carries it; READY whatever became of it (a dropped export is logged at
 //!   debug). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
-//!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
+//!   the connector, `…; disabling OTLP trace export`, and no later batch is sent. Each export holds
+//!   the settings it started under: one still in flight across a reload finishes, and is logged,
+//!   against its own endpoint, and never settles the reloaded run.
 //! * `scrape` and `serve` — REFUSED: the sink carries no metrics and serves no route.
 //! * `status` and `check` — READY with nothing to report.
 
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::sync::{Mutex, PoisonError};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
@@ -24,8 +26,8 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
+use busbar_contract::abi::mechanism::call::{AbiStr, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement, MARK_ONE_INSTANCE, REWRITE_ALIAS};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
@@ -33,7 +35,7 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
-    mask_userinfo, proto, request_target, split_credentials, OtlpSettings, CONTENT_TYPE,
+    mask_userinfo, proto, request_target, split_credentials, OtlpSettings, ALIAS, CONTENT_TYPE,
     EXPORT_TIMEOUT_MS, NAME,
 };
 
@@ -46,47 +48,53 @@ pub const NEED: u32 = 0;
 /// dial to any other host. Each export names the same collector ([`Endpoint::collector`], the URL
 /// with its userinfo stripped), so no credential is ever part of what the host dials; the userinfo
 /// travels only as the request's `Authorization`.
-pub(crate) const NEEDS: &[Need] = &[Need {
-    direction: DIRECTION_OUTBOUND,
-    egress_class: EGRESS_LOOPBACK_ALLOWED,
-    transport: abi_str("http"),
-    auth: abi_str(""),
-    target_from: abi_str("settings.url"),
-    trust_from: abi_str(""),
-    details: Blob::ABSENT,
-    keep_response_headers: std::ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: EXPORT_TIMEOUT_MS,
+pub(crate) const NEEDS: &[Need] = &[{
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_LOOPBACK_ALLOWED;
+    n.transport = abi_str("http");
+    n.auth = abi_str("");
+    n.target_from = abi_str("settings.url");
+    n.trust_from = abi_str("");
+    n.timeout_ms = EXPORT_TIMEOUT_MS;
     // The collector's response head is not read: the named (empty) list, nothing denied beyond it.
-    keep_mode: KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: std::ptr::null(),
-    deny_response_headers_len: 0,
+    n.keep_mode = KEEP_NAMED;
+    n
 }];
 
 /// The one stream the sink carries.
 const STREAMS: &[u8] = &[ExportStream::Traces as u8];
 
-const TAIL: Tail = Tail {
-    head: KindTailHead {
-        size: std::mem::size_of::<Tail>() as u32,
-        _reserved: 0,
-    },
-    streams: STREAMS.as_ptr(),
-    streams_len: STREAMS.len(),
-    routes: std::ptr::null(),
-    routes_len: 0,
-};
+const TAIL: Tail = Tail::EMPTY.with_streams(STREAMS);
+
+/// The module name an operator writes, as the alias the registry holds beside [`NAME`].
+const REWRITES: &[Rewrite] = &[Rewrite {
+    class: REWRITE_ALIAS,
+    _reserved: 0,
+    from: abi_str(ALIAS),
+    to: AbiStr::ABSENT,
+}];
+
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246); the
+    /// signed tarball carries the same file (`--declares-file`).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
 
 /// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
-pub const STATEMENT: Statement = Statement {
-    kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
-    needs: NEEDS.as_ptr(),
-    needs_len: NEEDS.len(),
+pub const STATEMENT: Statement = {
+    let mut s = statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+        .with_needs(NEEDS)
+        .with_rewrites(REWRITES)
+        .with_kind_tail(&TAIL);
+    s.extensions = EXTENSIONS;
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
     // refusal of a second `module: otlp` sink in 1.5.5's text (`crate::check_limits`).
-    marks: MARK_ONE_INSTANCE,
-    ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+    s.marks = MARK_ONE_INSTANCE;
+    s
 };
 
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
@@ -152,47 +160,61 @@ impl Endpoint {
     }
 }
 
+/// One run of the instance: the settings one open or reload gave it, and what the host's first
+/// answer under them settled.
+#[derive(Debug, Default)]
+struct Run {
+    /// Bumped by every reload: the run an export was issued under.
+    generation: u64,
+    endpoint: Endpoint,
+    /// Whether this run takes spans, once the host's first answer settled it.
+    admitted: Option<bool>,
+}
+
 /// One opened instance.
 #[derive(Debug)]
 pub struct Otlp {
-    endpoint: RwLock<Endpoint>,
-    /// Whether this run takes spans, once the host's first answer settled it.
-    admitted: Mutex<Option<bool>>,
+    run: Mutex<Run>,
+}
+
+/// What an export holds from its start to its end, PENDING included: the run it was issued under
+/// and that run's endpoint, so a reload while it is in flight changes nothing for it.
+struct Export {
+    generation: u64,
+    endpoint: Endpoint,
+    exchange: Exchange,
 }
 
 impl Otlp {
-    /// The endpoint this instance sends to.
-    #[must_use]
-    pub fn endpoint(&self) -> Endpoint {
-        self.endpoint
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+    /// The run a new export is issued under and its endpoint; `None` when the host refused this
+    /// run's exports: its connector refused the first one (the egress class's verdict on the
+    /// target, or no connector at all).
+    fn issue(&self) -> Option<(u64, Endpoint)> {
+        let run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+        (run.admitted != Some(false)).then(|| (run.generation, run.endpoint.clone()))
     }
 
-    /// Whether the host refused this run's exports: its connector refused the first one (the
-    /// egress class's verdict on the target, or no connector at all).
-    fn refused(&self) -> bool {
-        *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) == Some(false)
-    }
-
-    /// What became of one export: the first answer the host gives settles whether this run takes
-    /// spans (the line a rollout check greps for, or the refusal and that export is disabled); a
-    /// non-2xx or failed export drops that batch, logged at debug.
-    fn settle(&self, shown: &str, result: &Result<ExchangeResponse, ConnFailure>) {
+    /// What became of one export issued under run `generation`: the first answer the host gives
+    /// under the CURRENT run settles whether it takes spans (the line a rollout check greps for, or
+    /// the refusal and that export is disabled); an export issued before a reload settles nothing
+    /// for the reloaded run. A non-2xx or failed export drops that batch, logged at debug against
+    /// the endpoint it was sent to.
+    fn settle(&self, generation: u64, shown: &str, result: &Result<ExchangeResponse, ConnFailure>) {
         {
-            let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
-            match (result, *admitted) {
-                (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
-                    tracing::error!("{e}; disabling OTLP trace export");
-                    *admitted = Some(false);
-                    return;
+            let mut run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+            if run.generation == generation {
+                match (result, run.admitted) {
+                    (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
+                        tracing::error!("{e}; disabling OTLP trace export");
+                        run.admitted = Some(false);
+                        return;
+                    }
+                    (Ok(_), None) => {
+                        tracing::info!(endpoint = %shown, "OTLP tracing enabled");
+                        run.admitted = Some(true);
+                    }
+                    _ => {}
                 }
-                (Ok(_), None) => {
-                    tracing::info!(endpoint = %shown, "OTLP tracing enabled");
-                    *admitted = Some(true);
-                }
-                _ => {}
             }
         }
         match result {
@@ -218,17 +240,23 @@ impl Life for Otlp {
 
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            endpoint: RwLock::new(Endpoint::of(settings)),
-            admitted: Mutex::new(None),
+            run: Mutex::new(Run {
+                generation: 0,
+                endpoint: Endpoint::of(settings),
+                admitted: None,
+            }),
         })
     }
 
+    /// A new run: the reloaded endpoint, unsettled. An export still in flight keeps the run it was
+    /// issued under, and its answer settles nothing here.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
-        *self
-            .endpoint
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Endpoint::of(settings);
-        *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+        *run = Run {
+            generation: run.generation.wrapping_add(1),
+            endpoint: Endpoint::of(settings),
+            admitted: None,
+        };
         Ok(Refreshed::default())
     }
 }
@@ -261,21 +289,26 @@ impl SafeSlot for Deliver {
         let Some(held) = instance.get() else {
             return Outcome::Refused;
         };
-        let endpoint = held.life().endpoint();
-        let mut state = match instance.resume::<Exchange>() {
+        // A RESUMED export finishes on the run and endpoint it was issued under, whatever a reload
+        // changed meanwhile.
+        let mut export = match instance.resume::<Export>() {
             Some(parked) => *parked,
             None => {
-                if held.life().refused() {
+                let Some((generation, endpoint)) = held.life().issue() else {
                     return Outcome::Ready;
-                }
-                let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
+                };
+                let Some(body) = batch_body(input.batch().bytes()) else {
                     return Outcome::Ready;
                 };
                 let Some(request) = endpoint.request(body) else {
                     return Outcome::Ready;
                 };
                 match Exchange::request(request) {
-                    Ok(state) => state,
+                    Ok(exchange) => Export {
+                        generation,
+                        endpoint,
+                        exchange,
+                    },
                     Err(e) => {
                         dropped(&endpoint.shown, &e);
                         return Outcome::Ready;
@@ -286,19 +319,20 @@ impl SafeSlot for Deliver {
         let answer = match held.host() {
             Some(host) => exchange(
                 &mut host.connector(instance.ticket()),
-                &mut state,
+                &mut export.exchange,
                 NEED,
-                endpoint.collector.as_deref(),
+                export.endpoint.collector.as_deref(),
             ),
             None => Poll::Ready(Err(ConnFailure::Unarmed)),
         };
         match answer {
             Poll::Pending => {
-                instance.park(state);
+                instance.park(export);
                 Outcome::Pending
             }
             Poll::Ready(result) => {
-                held.life().settle(&endpoint.shown, &result);
+                held.life()
+                    .settle(export.generation, &export.endpoint.shown, &result);
                 Outcome::Ready
             }
         }
@@ -355,13 +389,13 @@ impl SafeSlot for Check {
         let Some(h) = instance.get() else {
             return Outcome::Refused;
         };
-        if input.phase != CHECK_PHASE_LIMITS {
+        if input.phase() != CHECK_PHASE_LIMITS {
             return Outcome::Ready;
         }
         let names: Vec<String> = input
             .instances()
             .iter()
-            .map(|c| String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned())
+            .map(|c| String::from_utf8_lossy(c.name().bytes()).into_owned())
             .collect();
         let lines = crate::check_limits(&names);
         if !lines.is_empty() {

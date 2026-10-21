@@ -9,9 +9,9 @@
 //! producer (K9a S7) — the span's `trace_id`, `span_id`, `parent_span_id`, `name`, `start`,
 //! `duration_us` and whichever of `pool` / `ingress` / `op` / `lane` / `provider` / `model` it
 //! carries. Each batch the host hands it becomes one OTLP/HTTP protobuf `ExportTraceServiceRequest`
-//! ([`proto`]): one resource (`service.name = busbar`), one scope (`busbar`), one span per record.
+//! (`proto`): one resource (`service.name = busbar`), one scope (`busbar`), one span per record.
 //!
-//! **Who dials.** The HOST: the sink declares one outbound need ([`door::STATEMENT`]) — framed
+//! **Who dials.** The HOST: the sink declares one outbound need (`door::STATEMENT`) — framed
 //! `http`, pinned to the instance's `url` setting with the userinfo stripped, under the
 //! `loopback-allowed` egress class (`https://`, or plaintext `http://` to a loopback collector
 //! only) — and a delivery is one
@@ -25,23 +25,26 @@
 //! first answer settles the run: refused, the sink logs `…; disabling OTLP trace export` and sends
 //! no later batch; carried, it logs `OTLP tracing enabled`.
 //!
-//! **Settings** ([`OtlpSettings`]): `url`, required.
+//! **Settings** (`OtlpSettings`): `url`, required.
 //!
-//! One door, both ways in: [`door::door`] is the row a busbar build links, and the sibling
+//! One door, both ways in: [`door`] is the row a busbar build links, and the sibling
 //! `busbar-export-otlp-plugin` cdylib exports the same door as its one symbol.
 
 #![forbid(unsafe_code)]
 
-pub mod config;
-pub mod door;
-pub mod proto;
+mod config;
+mod door;
 
-pub use config::OtlpSettings;
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
+mod proto;
+
+use config::OtlpSettings;
 
 /// THE LIMITS CHECK across every configured instance of this sink, in configuration order: the sink
 /// states the `one_instance` mark, so a second instance is refused in busbar 1.5.5's words, once per
 /// extra instance, naming the first.
-pub fn check_limits(instances: &[String]) -> Vec<String> {
+fn check_limits(instances: &[String]) -> Vec<String> {
     let Some((first, rest)) = instances.split_first() else {
         return Vec::new();
     };
@@ -57,22 +60,20 @@ pub fn check_limits(instances: &[String]) -> Vec<String> {
 }
 
 /// The plugin's canonical name.
-pub const NAME: &str = "busbar-export-otlp";
+const NAME: &str = "busbar-export-otlp";
 /// The module name an `export:` instance names it by.
-pub const ALIAS: &str = "otlp";
-/// The manifest `declares` section the signed tarball carries (`--declares-file`).
-pub const DECLARES: &str = include_str!("../declares.json");
+const ALIAS: &str = "otlp";
 
 /// OTLP/HTTP's binary protobuf encoding.
-pub const CONTENT_TYPE: &str = "application/x-protobuf";
+const CONTENT_TYPE: &str = "application/x-protobuf";
 /// Each export's end-to-end deadline: the ten seconds 1.5.x's exporter held its HTTP client to.
-pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
+const EXPORT_TIMEOUT_MS: u64 = 10_000;
 /// The HTTP Basic auth scheme prefix (RFC 7617), with its trailing space.
 const BASIC: &str = "Basic ";
 
 /// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
 /// a URL with none, or a string that is not a URL, unchanged.
-pub fn mask_userinfo(url: &str) -> String {
+fn mask_userinfo(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return cut_userinfo(url, "***@");
     };
@@ -92,7 +93,7 @@ pub fn mask_userinfo(url: &str) -> String {
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
 /// base64(user:pass)))` — RFC 7617, the userinfo percent-decoded — or `(endpoint, None)` when it
 /// carries none or is not a URL. What the request carries never holds the secret in its target.
-pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
+fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     let Ok(mut parsed) = url::Url::parse(endpoint) else {
         // Not a URL the client can parse (1.5.5 accepted any string as the url): no credential is
         // made of it, and its userinfo never reaches the host's dial target.
@@ -123,7 +124,7 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
 
 /// The request target `endpoint` names: its path and query (`/` when it has no path), or `/` when
 /// it is not a URL.
-pub fn request_target(endpoint: &str) -> String {
+fn request_target(endpoint: &str) -> String {
     match url::Url::parse(endpoint) {
         Ok(u) => {
             let target = &u[url::Position::BeforePath..url::Position::AfterQuery];
