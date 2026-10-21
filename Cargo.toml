@@ -35,12 +35,12 @@ repository = "https://github.com/GetBusbar/busbar-export-otlp"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "1b09a4a79a962112c8ef8036e2df50a7221daf5e" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "1b09a4a79a962112c8ef8036e2df50a7221daf5e" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967" }
 # THE SUITE'S HOST CONNECTOR (dev-only; export-otlp-plugin/tests/support/conformance_host.rs,
 # rendered because the declares file states network needs): busbar's connector and its TLS
 # test kit at the pin, and the transport framers those needs name, at the revs busbar links.
-busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "1b09a4a79a962112c8ef8036e2df50a7221daf5e", features = ["test-support"] }
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967", features = ["test-support"] }
 busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "223ec3f02000de94089a1752635b9e206f7492e5" }
 # busbar's root [workspace.dependencies], third-party rows, at 1b09a4a79a962112c8ef8036e2df50a7221daf5e
