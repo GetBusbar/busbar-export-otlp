@@ -96,7 +96,7 @@ busbar_contract::statement_extensions!(
     /// signed tarball carries the same file (`--declares-file`).
     EXTENSIONS: [(
         busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
-        include_bytes!("../declares.json"),
+        include_bytes!("../declares.json")
     )]
 );
 
