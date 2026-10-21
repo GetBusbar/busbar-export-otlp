@@ -399,4 +399,4 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
+pub use table::{door, MACRO_DOOR};
