@@ -5,7 +5,7 @@
 //! the export kind's memory ABI (THE DESIGN §11.4), run against the busbar rev this repo pins
 //! (`.busbar-ref`).
 //!
-//! The sink is held two ways at once: LINKED (the logic crate's `door::door`, through the loader's
+//! The sink is held two ways at once: LINKED (the logic crate's `door`, through the loader's
 //! `load_linked`) and DROPPED IN (this crate's built cdylib, `dlopen`ed by the loader's
 //! `load_dropped`, which resolves `busbar_plugin_door` and compares its Statement with the linked
 //! row's, byte for byte). Each is bound to a real dispatcher and to a stand-in for the host's
@@ -53,8 +53,8 @@ use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::kinds::secret::Secret;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, ConnTable, Diagnostic,
-    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin,
-    NO_BLOB,
+    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, LoadedDoor,
+    Metric, Plugin, NO_BLOB,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use prost::Message as _;
@@ -83,9 +83,16 @@ fn cdylib() -> PathBuf {
         .unwrap_or_else(|| panic!("the busbar-export-otlp-plugin cdylib ({file}) is not built"))
 }
 
+/// This crate's own door, as the loader names a compiled-in one.
+#[allow(unused_unsafe)]
+fn loaded() -> LoadedDoor {
+    // SAFETY: `door` is this crate's own `plugin_door!` entry.
+    unsafe { LoadedDoor::from_raw(busbar_export_otlp::door) }
+}
+
 /// The row a busbar build that links the sink states.
 fn row() -> LinkedRow {
-    LinkedRow::of(busbar_export_otlp::door).expect("the linked door renders")
+    LinkedRow::of_loaded(loaded()).expect("the linked door renders")
 }
 
 // ── the host's stand-ins ─────────────────────────────────────────────────────────────────────────
@@ -333,11 +340,10 @@ fn load(host: &Host, dropped: bool) -> Plugin<Export> {
 // ── the script ───────────────────────────────────────────────────────────────────────────────────
 
 fn blob(bytes: &[u8], fmt: u32) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt,
-        flags: 0,
+    // SAFETY: test-owned bytes, borrowed as the plain `Blob { ptr, len, .. }` literal borrowed them: the callers keep them alive for the call that reads the blob.
+    #[allow(unused_unsafe)]
+    unsafe {
+        Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), fmt, 0)
     }
 }
 
@@ -850,7 +856,7 @@ fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
 // ── THE PUBLISHED CONFORMANCE SUITE ─────────────────────────────────────────────────────────────
 //
 // busbar's suite, at the commit this repo pins (`.busbar-ref`), drives the OTLP sink two ways
-// through the one loader: LINKED (the logic crate's `door::door`) and DROPPED IN (this crate's
+// through the one loader: LINKED (the logic crate's `door`) and DROPPED IN (this crate's
 // built cdylib), over the export kind's script with the inputs in `conformance.json` (refused
 // settings in the grammar's words, a `traces` delivery that DIALS the collector, status and check,
 // a route-less `serve` refused; the sink carries no metrics, so no scrape); every step's crossings
@@ -891,7 +897,7 @@ fn suite_host(
 }
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_export_otlp::door,
+    loaded: loaded(),
     cdylib: "busbar_export_otlp_plugin",
     inputs: include_str!("conformance.json"),
     host: suite_host,

@@ -26,10 +26,8 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{
-    KindTailHead, Rewrite, Statement, MARK_ONE_INSTANCE, REWRITE_ALIAS,
-};
+use busbar_contract::abi::mechanism::call::{AbiStr, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement, MARK_ONE_INSTANCE, REWRITE_ALIAS};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
@@ -50,47 +48,31 @@ pub const NEED: u32 = 0;
 /// dial to any other host. Each export names the same collector ([`Endpoint::collector`], the URL
 /// with its userinfo stripped), so no credential is ever part of what the host dials; the userinfo
 /// travels only as the request's `Authorization`.
-pub(crate) const NEEDS: &[Need] = &[Need {
-    direction: DIRECTION_OUTBOUND,
-    egress_class: EGRESS_LOOPBACK_ALLOWED,
-    transport: abi_str("http"),
-    auth: abi_str(""),
-    target_from: abi_str("settings.url"),
-    trust_from: abi_str(""),
-    details: Blob::ABSENT,
-    keep_response_headers: std::ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: EXPORT_TIMEOUT_MS,
+pub(crate) const NEEDS: &[Need] = &[{
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_LOOPBACK_ALLOWED;
+    n.transport = abi_str("http");
+    n.auth = abi_str("");
+    n.target_from = abi_str("settings.url");
+    n.trust_from = abi_str("");
+    n.timeout_ms = EXPORT_TIMEOUT_MS;
     // The collector's response head is not read: the named (empty) list, nothing denied beyond it.
-    keep_mode: KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: std::ptr::null(),
-    deny_response_headers_len: 0,
+    n.keep_mode = KEEP_NAMED;
+    n
 }];
 
 /// The one stream the sink carries.
 const STREAMS: &[u8] = &[ExportStream::Traces as u8];
 
-const TAIL: Tail = Tail {
-    head: KindTailHead {
-        size: std::mem::size_of::<Tail>() as u32,
-        _reserved: 0,
-    },
-    streams: STREAMS.as_ptr(),
-    streams_len: STREAMS.len(),
-    routes: std::ptr::null(),
-    routes_len: 0,
-};
+const TAIL: Tail = Tail::EMPTY.with_streams(STREAMS);
 
 /// The module name an operator writes, as the alias the registry holds beside [`NAME`].
 const REWRITES: &[Rewrite] = &[Rewrite {
     class: REWRITE_ALIAS,
     _reserved: 0,
     from: abi_str(ALIAS),
-    to: AbiStr {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
+    to: AbiStr::ABSENT,
 }];
 
 busbar_contract::statement_extensions!(
@@ -103,17 +85,16 @@ busbar_contract::statement_extensions!(
 );
 
 /// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
-pub const STATEMENT: Statement = Statement {
-    kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
-    needs: NEEDS.as_ptr(),
-    needs_len: NEEDS.len(),
-    rewrites: REWRITES.as_ptr(),
-    rewrites_len: REWRITES.len(),
-    extensions: EXTENSIONS,
+pub const STATEMENT: Statement = {
+    let mut s = statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+        .with_needs(NEEDS)
+        .with_rewrites(REWRITES)
+        .with_kind_tail(&TAIL);
+    s.extensions = EXTENSIONS;
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
     // refusal of a second `module: otlp` sink in 1.5.5's text (`crate::check_limits`).
-    marks: MARK_ONE_INSTANCE,
-    ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+    s.marks = MARK_ONE_INSTANCE;
+    s
 };
 
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
@@ -326,7 +307,7 @@ impl SafeSlot for Deliver {
                 let Some((generation, endpoint)) = held.life().issue() else {
                     return Outcome::Ready;
                 };
-                let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
+                let Some(body) = batch_body(input.batch().bytes()) else {
                     return Outcome::Ready;
                 };
                 let Some(request) = endpoint.request(body) else {
@@ -418,13 +399,13 @@ impl SafeSlot for Check {
         let Some(h) = instance.get() else {
             return Outcome::Refused;
         };
-        if input.phase != CHECK_PHASE_LIMITS {
+        if input.phase() != CHECK_PHASE_LIMITS {
             return Outcome::Ready;
         }
         let names: Vec<String> = input
             .instances()
             .iter()
-            .map(|c| String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned())
+            .map(|c| String::from_utf8_lossy(c.name().bytes()).into_owned())
             .collect();
         let lines = crate::check_limits(&names);
         if !lines.is_empty() {
