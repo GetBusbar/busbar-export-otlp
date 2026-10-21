@@ -186,16 +186,6 @@ struct Export {
 }
 
 impl Otlp {
-    /// The endpoint this instance sends to.
-    #[must_use]
-    pub fn endpoint(&self) -> Endpoint {
-        self.run
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .endpoint
-            .clone()
-    }
-
     /// The run a new export is issued under and its endpoint; `None` when the host refused this
     /// run's exports: its connector refused the first one (the egress class's verdict on the
     /// target, or no connector at all).
