@@ -24,8 +24,10 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::door::{
+    KindTailHead, Rewrite, Statement, MARK_ONE_INSTANCE, REWRITE_ALIAS,
+};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
@@ -33,7 +35,7 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
-    mask_userinfo, proto, request_target, split_credentials, OtlpSettings, CONTENT_TYPE,
+    mask_userinfo, proto, request_target, split_credentials, OtlpSettings, ALIAS, CONTENT_TYPE,
     EXPORT_TIMEOUT_MS, NAME,
 };
 
@@ -78,11 +80,34 @@ const TAIL: Tail = Tail {
     routes_len: 0,
 };
 
+/// The module name an operator writes, as the alias the registry holds beside [`NAME`].
+const REWRITES: &[Rewrite] = &[Rewrite {
+    class: REWRITE_ALIAS,
+    _reserved: 0,
+    from: abi_str(ALIAS),
+    to: AbiStr {
+        ptr: std::ptr::null(),
+        len: 0,
+    },
+}];
+
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246); the
+    /// signed tarball carries the same file (`--declares-file`).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json"),
+    )]
+);
+
 /// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
 pub const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
+    rewrites: REWRITES.as_ptr(),
+    rewrites_len: REWRITES.len(),
+    extensions: EXTENSIONS,
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
     // refusal of a second `module: otlp` sink in 1.5.5's text (`crate::check_limits`).
     marks: MARK_ONE_INSTANCE,

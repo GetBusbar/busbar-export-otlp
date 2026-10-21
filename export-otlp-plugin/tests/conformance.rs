@@ -85,7 +85,7 @@ fn cdylib() -> PathBuf {
 
 /// The row a busbar build that links the sink states.
 fn row() -> LinkedRow {
-    LinkedRow::of(busbar_export_otlp::door::door).expect("the linked door renders")
+    LinkedRow::of(busbar_export_otlp::door).expect("the linked door renders")
 }
 
 // ── the host's stand-ins ─────────────────────────────────────────────────────────────────────────
@@ -774,7 +774,7 @@ fn suite_host(
 }
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_export_otlp::door::door,
+    door: busbar_export_otlp::door,
     cdylib: "busbar_export_otlp_plugin",
     inputs: include_str!("conformance.json"),
     host: suite_host,
