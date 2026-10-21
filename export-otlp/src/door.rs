@@ -10,11 +10,13 @@
 //! * `deliver` — the batch's spans as one OTLP request, sent by `exchange()` over the declared need,
 //!   PENDING while the host carries it; READY whatever became of it (a dropped export is logged at
 //!   debug). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
-//!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
+//!   the connector, `…; disabling OTLP trace export`, and no later batch is sent. Each export holds
+//!   the settings it started under: one still in flight across a reload finishes, and is logged,
+//!   against its own endpoint, and never settles the reloaded run.
 //! * `scrape` and `serve` — REFUSED: the sink carries no metrics and serves no route.
 //! * `status` and `check` — READY with nothing to report.
 
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::sync::{Mutex, PoisonError};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
@@ -177,47 +179,71 @@ impl Endpoint {
     }
 }
 
+/// One run of the instance: the settings one open or reload gave it, and what the host's first
+/// answer under them settled.
+#[derive(Debug, Default)]
+struct Run {
+    /// Bumped by every reload: the run an export was issued under.
+    generation: u64,
+    endpoint: Endpoint,
+    /// Whether this run takes spans, once the host's first answer settled it.
+    admitted: Option<bool>,
+}
+
 /// One opened instance.
 #[derive(Debug)]
 pub struct Otlp {
-    endpoint: RwLock<Endpoint>,
-    /// Whether this run takes spans, once the host's first answer settled it.
-    admitted: Mutex<Option<bool>>,
+    run: Mutex<Run>,
+}
+
+/// What an export holds from its start to its end, PENDING included: the run it was issued under
+/// and that run's endpoint, so a reload while it is in flight changes nothing for it.
+struct Export {
+    generation: u64,
+    endpoint: Endpoint,
+    exchange: Exchange,
 }
 
 impl Otlp {
     /// The endpoint this instance sends to.
     #[must_use]
     pub fn endpoint(&self) -> Endpoint {
-        self.endpoint
-            .read()
+        self.run
+            .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .endpoint
             .clone()
     }
 
-    /// Whether the host refused this run's exports: its connector refused the first one (the
-    /// egress class's verdict on the target, or no connector at all).
-    fn refused(&self) -> bool {
-        *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) == Some(false)
+    /// The run a new export is issued under and its endpoint; `None` when the host refused this
+    /// run's exports: its connector refused the first one (the egress class's verdict on the
+    /// target, or no connector at all).
+    fn issue(&self) -> Option<(u64, Endpoint)> {
+        let run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+        (run.admitted != Some(false)).then(|| (run.generation, run.endpoint.clone()))
     }
 
-    /// What became of one export: the first answer the host gives settles whether this run takes
-    /// spans (the line a rollout check greps for, or the refusal and that export is disabled); a
-    /// non-2xx or failed export drops that batch, logged at debug.
-    fn settle(&self, shown: &str, result: &Result<ExchangeResponse, ConnFailure>) {
+    /// What became of one export issued under run `generation`: the first answer the host gives
+    /// under the CURRENT run settles whether it takes spans (the line a rollout check greps for, or
+    /// the refusal and that export is disabled); an export issued before a reload settles nothing
+    /// for the reloaded run. A non-2xx or failed export drops that batch, logged at debug against
+    /// the endpoint it was sent to.
+    fn settle(&self, generation: u64, shown: &str, result: &Result<ExchangeResponse, ConnFailure>) {
         {
-            let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
-            match (result, *admitted) {
-                (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
-                    tracing::error!("{e}; disabling OTLP trace export");
-                    *admitted = Some(false);
-                    return;
+            let mut run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+            if run.generation == generation {
+                match (result, run.admitted) {
+                    (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
+                        tracing::error!("{e}; disabling OTLP trace export");
+                        run.admitted = Some(false);
+                        return;
+                    }
+                    (Ok(_), None) => {
+                        tracing::info!(endpoint = %shown, "OTLP tracing enabled");
+                        run.admitted = Some(true);
+                    }
+                    _ => {}
                 }
-                (Ok(_), None) => {
-                    tracing::info!(endpoint = %shown, "OTLP tracing enabled");
-                    *admitted = Some(true);
-                }
-                _ => {}
             }
         }
         match result {
@@ -243,17 +269,23 @@ impl Life for Otlp {
 
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            endpoint: RwLock::new(Endpoint::of(settings)),
-            admitted: Mutex::new(None),
+            run: Mutex::new(Run {
+                generation: 0,
+                endpoint: Endpoint::of(settings),
+                admitted: None,
+            }),
         })
     }
 
+    /// A new run: the reloaded endpoint, unsettled. An export still in flight keeps the run it was
+    /// issued under, and its answer settles nothing here.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
-        *self
-            .endpoint
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Endpoint::of(settings);
-        *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let mut run = self.run.lock().unwrap_or_else(PoisonError::into_inner);
+        *run = Run {
+            generation: run.generation.wrapping_add(1),
+            endpoint: Endpoint::of(settings),
+            admitted: None,
+        };
         Ok(Refreshed::default())
     }
 }
@@ -286,13 +318,14 @@ impl SafeSlot for Deliver {
         let Some(held) = instance.get() else {
             return Outcome::Refused;
         };
-        let endpoint = held.life().endpoint();
-        let mut state = match instance.resume::<Exchange>() {
+        // A RESUMED export finishes on the run and endpoint it was issued under, whatever a reload
+        // changed meanwhile.
+        let mut export = match instance.resume::<Export>() {
             Some(parked) => *parked,
             None => {
-                if held.life().refused() {
+                let Some((generation, endpoint)) = held.life().issue() else {
                     return Outcome::Ready;
-                }
+                };
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
@@ -300,7 +333,11 @@ impl SafeSlot for Deliver {
                     return Outcome::Ready;
                 };
                 match Exchange::request(request) {
-                    Ok(state) => state,
+                    Ok(exchange) => Export {
+                        generation,
+                        endpoint,
+                        exchange,
+                    },
                     Err(e) => {
                         dropped(&endpoint.shown, &e);
                         return Outcome::Ready;
@@ -311,19 +348,20 @@ impl SafeSlot for Deliver {
         let answer = match held.host() {
             Some(host) => exchange(
                 &mut host.connector(instance.ticket()),
-                &mut state,
+                &mut export.exchange,
                 NEED,
-                endpoint.collector.as_deref(),
+                export.endpoint.collector.as_deref(),
             ),
             None => Poll::Ready(Err(ConnFailure::Unarmed)),
         };
         match answer {
             Poll::Pending => {
-                instance.park(state);
+                instance.park(export);
                 Outcome::Pending
             }
             Poll::Ready(result) => {
-                held.life().settle(&endpoint.shown, &result);
+                held.life()
+                    .settle(export.generation, &export.endpoint.shown, &result);
                 Outcome::Ready
             }
         }

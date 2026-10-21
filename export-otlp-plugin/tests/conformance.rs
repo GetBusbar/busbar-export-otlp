@@ -28,7 +28,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use busbar_contract::abi::export::{
     self, CheckIn, CheckOut, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn, ServeOut,
@@ -102,6 +102,10 @@ struct Collector {
     declared: Mutex<HashMap<(InstanceId, NeedId), Declared>>,
     carried: Mutex<Vec<Value>>,
     replies: Mutex<HashMap<ConnId, VecDeque<Piece>>>,
+    /// While set, every read pends with its wake recorded in `held`: an export held in flight.
+    hold: Mutex<bool>,
+    /// The wakes the held reads registered, as `(caller, wake number)`.
+    held: Mutex<Vec<(InstanceId, u64)>>,
 }
 
 /// The egress verdict on `target` under `class`.
@@ -229,8 +233,18 @@ impl Conns for Collector {
         Ok(b.len())
     }
 
-    fn read(&self, c: InstanceId, id: ConnId, _: u64, _: &mut [u8]) -> Result<Piece, ConnError> {
+    fn read(
+        &self,
+        c: InstanceId,
+        id: ConnId,
+        ticket: u64,
+        _: &mut [u8],
+    ) -> Result<Piece, ConnError> {
         self.slab.get(c, id)?;
+        if *self.hold.lock().unwrap() {
+            self.held.lock().unwrap().push((c, ticket));
+            return Err(ConnError::Pending);
+        }
         self.replies
             .lock()
             .unwrap()
@@ -695,6 +709,109 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
         other, linked,
         "a door over another config must not compare equal"
     );
+}
+
+/// RED: AN EXPORT IN FLIGHT ACROSS A RELOAD SETTLES NOTHING FOR THE RELOADED RUN. An export is
+/// issued to the reachable collector and held in flight; the instance is reloaded onto a target the
+/// connector refuses; the held export is then answered 200. That answer belongs to the run it was
+/// issued under: the sink never says `OTLP tracing enabled` for the reloaded endpoint, which nothing
+/// reached, and the reloaded run's own first answer (the connector's refusal) disables it in the
+/// error line its spec states, after which no batch is offered. Before the fix the held export
+/// read the reloaded endpoint and settled the reloaded run: it logged `OTLP tracing enabled` for
+/// the refused target and marked the run admitted, so the refusal never disabled it and every
+/// later batch was offered and dropped at debug.
+#[test]
+fn an_export_in_flight_across_a_reload_does_not_settle_the_reloaded_run() {
+    for dropped in [false, true] {
+        let host = Host::new();
+        let p = load(&host, dropped);
+        assert_eq!(open(&p, COLLECTOR), "Ready ");
+
+        *host.collector.hold.lock().unwrap() = true;
+        let batch = jsonl(&[record("0000000000000031", None)]);
+        let mut input: DeliverIn = blank_in();
+        input.head = in_head();
+        input.stream = ExportStream::Traces as u8;
+        input.batch = blob(&batch, BLOB_JSONL);
+        let ticket = host.d.mint(0).expect("a ticket");
+        let reply = host.d.submit(
+            &p,
+            ticket,
+            export::slot::DELIVER,
+            Frame::new(input, out_head()),
+            DeadlineClass::WriteBehind,
+            now_ns() + 10_000_000_000,
+        );
+        let started = Instant::now();
+        while host.collector.held.lock().unwrap().is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the export never went in flight"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(refresh(&p, INTERNAL), "Ready ");
+
+        *host.collector.hold.lock().unwrap() = false;
+        let wakes = std::mem::take(&mut *host.collector.held.lock().unwrap());
+        for (owner, n) in wakes {
+            (host.d.conn_waker())(owner, n);
+        }
+        let done = reply
+            .wait(Duration::from_secs(10))
+            .expect("the held export completes");
+        host.d.recycle(ticket);
+        drop(batch);
+        assert_eq!(format!("{:?}", done.outcome), "Ready");
+
+        let after = [
+            deliver(&host, &p, &[record("0000000000000032", None)]),
+            deliver(&host, &p, &[record("0000000000000033", None)]),
+        ];
+        assert_eq!(after, ["Ready ", "Ready "]);
+        assert_eq!(close(&p), "Ready ");
+
+        let carried = host.collector.carried.lock().unwrap().clone();
+        assert_eq!(
+            carried.len(),
+            1,
+            "only the held export was carried: {carried:?}"
+        );
+        assert_eq!(carried[0]["target"], "http://127.0.0.1:4318/v1/traces");
+        assert_eq!(carried[0]["head_target"], "/v1/traces");
+
+        let lines = host.lines.0.lock().unwrap().clone();
+        let all = lines.join("\n");
+        let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
+        assert_eq!(
+            count("OTLP tracing enabled endpoint=https://collector.internal.example"),
+            0,
+            "the reloaded endpoint was announced though nothing reached it: {all}"
+        );
+        assert_eq!(
+            count("OTLP tracing enabled"),
+            0,
+            "the held export settled a run: {all}"
+        );
+        assert_eq!(
+            count("; disabling OTLP trace export"),
+            1,
+            "the reloaded run's refusal did not disable it: {all}"
+        );
+        assert!(
+            lines
+                .iter()
+                .filter(|l| l.contains("disabling"))
+                .all(|l| l.starts_with("2 ")),
+            "a refusal is an error line: {all}"
+        );
+        assert_eq!(
+            count("OTLP span export failed"),
+            0,
+            "a batch was offered to the refused target after its refusal: {all}"
+        );
+    }
 }
 
 /// RED: the door asked for as another kind is refused, by either origin, before any slot runs.
