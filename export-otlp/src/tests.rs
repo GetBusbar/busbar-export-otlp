@@ -6,7 +6,34 @@
 //! doors is proven by `busbar-export-otlp-plugin`'s conformance test.
 
 use super::*;
+use busbar_contract::abi::sdk::cred::{CredUrl, Seal, UserinfoUrl};
 use busbar_contract::abi::sdk::exchange::Request;
+use busbar_contract::abi::sdk::test_support::chip::sealed_bytes;
+
+/// The credential split as the wire carries it: the `Authorization` the chip makes, read back
+/// through the dev-only test support.
+fn split_credentials(url: &str) -> (String, Option<String>) {
+    let u = UserinfoUrl(CredUrl::parse_userinfo(url).expect("splits"));
+    let (clean, auth) = crate::split_credentials(&u);
+    let auth =
+        auth.map(|(user, pw)| String::from_utf8_lossy(&sealed_bytes(&pw.basic(user))).into_owned());
+    (clean, auth)
+}
+
+/// The request as the wire carries it: the sealed fields in their place.
+fn wire(r: Option<(Request, Vec<(usize, Vec<u8>, Seal)>)>) -> Option<Request> {
+    let (mut r, sealed) = r?;
+    let public = std::mem::take(&mut r.fields);
+    for at in 0..=public.len() {
+        for (_, name, seal) in sealed.iter().filter(|(a, ..)| (*a).min(public.len()) == at) {
+            r.fields.push((name.clone(), sealed_bytes(seal)));
+        }
+        if let Some(f) = public.get(at) {
+            r.fields.push(f.clone());
+        }
+    }
+    Some(r)
+}
 use busbar_contract::abi::sdk::life::Life;
 use door::{Endpoint, Otlp};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -309,7 +336,7 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
         "span_id": "0000000000000002", "name": "n", "start": 1, "duration_us": 1})])
     .expect("a span");
     assert_eq!(
-        endpoint.request(body.clone()),
+        wire(endpoint.request(body.clone())),
         Some(Request {
             method: b"POST".to_vec(),
             target: b"/v1/traces".to_vec(),
@@ -343,17 +370,12 @@ fn a_plus_after_percent_is_not_an_escape() {
     assert_eq!(percent_decode("ab%+41cd"), b"ab%+41cd");
     assert_eq!(
         split_credentials("https://u:ab%+41cd@collector.example/v1").1,
-        Some(format!("Basic {}", base64(b"u:ab%+41cd")))
+        Some("Basic dTphYiUrNDFjZA==".to_string())
     );
 }
 
 #[test]
 fn the_small_encoders_match_their_standards() {
-    assert_eq!(base64(b""), "");
-    assert_eq!(base64(b"f"), "Zg==");
-    assert_eq!(base64(b"fo"), "Zm8=");
-    assert_eq!(base64(b"foo"), "Zm9v");
-    assert_eq!(base64(b"user:pass"), "dXNlcjpwYXNz");
     assert_eq!(percent_decode("a%20b%zz%4"), b"a b%zz%4");
     assert_eq!(
         split_credentials("http://localhost:4318/v1/traces"),
@@ -416,13 +438,6 @@ fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
             "{endpoint}"
         );
     }
-    for (input, want) in [
-        (&b"foob"[..], "Zm9vYg=="),
-        (b"fooba", "Zm9vYmE="),
-        (b"foobar", "Zm9vYmFy"),
-    ] {
-        assert_eq!(base64(input), want);
-    }
 }
 
 /// A password with an unescaped `/`, `?` or `#` makes the url unparsable (the text before it reads as
@@ -444,7 +459,7 @@ fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
         let debug = format!(
             "{:?}",
             config::OtlpSettings {
-                url: url.to_string()
+                url: UserinfoUrl(CredUrl::parse_userinfo(url).expect("splits"))
             }
         );
         assert!(!debug.contains(secret), "Debug leaked: {debug}");
@@ -530,7 +545,7 @@ fn no_collector_credential_renders_through_debug() {
 /// went through a lossy UTF-8 reading, and `0xFF` reached the collector as `EF BF BD`.
 #[test]
 fn a_userinfos_escaped_octets_reach_the_collector_as_they_are() {
-    let (clean, auth) = crate::split_credentials("https://u:p%FFw@collector.example/v1/traces");
+    let (clean, auth) = split_credentials("https://u:p%FFw@collector.example/v1/traces");
     assert_eq!(clean, "https://collector.example/v1/traces");
     // base64("u:p\xFFw") = "dTpw/3c=".
     assert_eq!(auth.as_deref(), Some("Basic dTpw/3c="));
@@ -549,7 +564,7 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
         crate::mask_userinfo(url),
         "https://***@collector.example:99999/v1/traces"
     );
-    let (collector, auth) = crate::split_credentials(url);
+    let (collector, auth) = split_credentials(url);
     assert!(!collector.contains("hunter2"), "{collector}");
     assert_eq!(auth, None);
     let raw = format!(r#"{{"url":"{url}"}}"#);

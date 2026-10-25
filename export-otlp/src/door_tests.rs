@@ -125,7 +125,9 @@ const CANARY: &str = "CANARY5e81bc";
 fn lines_for(url: &str) -> String {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let settings = crate::OtlpSettings {
-        url: url.to_string(),
+        url: busbar_contract::abi::sdk::cred::UserinfoUrl(
+            busbar_contract::abi::sdk::cred::CredUrl::parse_userinfo(url).expect("splits"),
+        ),
     };
     let reply = |status| {
         Ok(ExchangeResponse {

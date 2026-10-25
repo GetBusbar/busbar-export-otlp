@@ -6,22 +6,23 @@
 //! The same serde the host's configuration grammar uses, so a settings error reads exactly as it
 //! always has (`export.<name>.settings: unknown field …` / `missing field `url``).
 
-use serde::{Deserialize, Serialize};
+use busbar_contract::abi::sdk::cred::UserinfoUrl;
+use serde::Deserialize;
 
 /// `settings:` of an `export.<name>.module: otlp` instance. Its `Debug` names the url as every line
 /// the sink writes names it ([`crate::log_target`]): userinfo, a non-OTLP path and the query masked.
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpSettings {
     /// OTLP/HTTP traces endpoint URL (e.g. `http://localhost:4318/v1/traces`) — REQUIRED. When an
     /// `otlp` export instance is present busbar exports its spans there.
-    pub url: String,
+    pub url: UserinfoUrl,
 }
 
 impl std::fmt::Debug for OtlpSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OtlpSettings")
-            .field("url", &crate::log_target(&self.url))
+            .field("url", &crate::log_target(self.url.public()))
             .finish()
     }
 }
@@ -35,8 +36,8 @@ impl OtlpSettings {
     ///
     /// # Errors
     /// The bytes are not JSON, or not this shape.
-    pub fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+    pub fn parse(bytes: &[u8]) -> Result<Self, busbar_contract::abi::sdk::cred::SettingsError> {
         let bytes = if bytes.is_empty() { b"{}" } else { bytes };
-        serde_json::from_value(serde_json::from_slice(bytes)?)
+        busbar_contract::abi::sdk::cred::settings(bytes)
     }
 }

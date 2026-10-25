@@ -58,6 +58,8 @@ pub fn check_limits(instances: &[String]) -> Vec<String> {
 }
 
 /// The plugin's canonical name.
+use busbar_contract::abi::sdk::cred::{Cred, PasswordAt, UserinfoUrl};
+
 pub const NAME: &str = "busbar-export-otlp";
 /// The module name an `export:` instance names it by.
 pub const ALIAS: &str = "otlp";
@@ -68,8 +70,6 @@ pub const DECLARES: &str = include_str!("../declares.json");
 pub const CONTENT_TYPE: &str = "application/x-protobuf";
 /// Each export's end-to-end deadline: the ten seconds 1.5.x's exporter held its HTTP client to.
 pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
-/// The HTTP Basic auth scheme prefix (RFC 7617), with its trailing space.
-const BASIC: &str = "Basic ";
 
 /// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
 /// a URL with none unchanged. A string that is not a URL but carries `scheme://userinfo@…` has its
@@ -78,7 +78,11 @@ pub fn mask_userinfo(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return cut_userinfo(url, "***@");
     };
-    if parsed.username().is_empty() && parsed.password().is_none() {
+    // A userinfo whose password was sealed at parse keeps its `@` (`https://@h/` for `:pw@`).
+    let at_in_authority = url.split_once("://").is_some_and(|(_, rest)| {
+        rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].contains('@')
+    });
+    if parsed.username().is_empty() && parsed.password().is_none() && !at_in_authority {
         return url.to_string();
     }
     if parsed.set_password(None).is_err() || parsed.set_username("***").is_err() {
@@ -134,11 +138,7 @@ pub fn log_target(url: &str) -> String {
 /// as written and userinfo-masked, the URL without userinfo, its path (unless OTLP's own), query and
 /// userinfo, each also percent-decoded; longest first.
 pub fn secret_parts(url: &str) -> Vec<String> {
-    let mut parts = vec![
-        url.to_string(),
-        mask_userinfo(url),
-        split_credentials(url).0,
-    ];
+    let mut parts = vec![url.to_string(), mask_userinfo(url), without_userinfo(url)];
     if let Ok(u) = url::Url::parse(url) {
         if !matches!(u.path(), "" | "/" | OTLP_TRACES_PATH) {
             parts.push(u.path().to_string());
@@ -181,9 +181,9 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything before its last `@` cut, never the credential.
 /// A url that does not parse, or has no `@` after its host, is not ambiguous here.
-pub fn ambiguous_url(url: &str) -> Option<String> {
+pub fn ambiguous_url(url: &str, unencoded: bool) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
-    if !parsed[url::Position::BeforePath..].contains('@') {
+    if !unencoded && !parsed[url::Position::BeforePath..].contains('@') {
         return None;
     }
     Some(format!(
@@ -195,26 +195,29 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
     ))
 }
 
-/// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
-/// base64(user:pass)))` — RFC 7617, the userinfo percent-decoded — or `(endpoint, None)` when it
-/// carries none or is not a URL. What the request carries never holds the secret in its target.
-pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
-    let Ok(mut parsed) = url::Url::parse(endpoint) else {
+/// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some((the user's octets, the
+/// sealed password)))` for the `Authorization: Basic` (RFC 7617) the chip makes of them, or
+/// `(endpoint, None)` when it carries none or is not a URL. What the request carries never holds
+/// the secret in its target.
+pub fn split_credentials(endpoint: &UserinfoUrl) -> (String, Option<(Vec<u8>, Cred)>) {
+    let text = endpoint.public();
+    // A password holding an unescaped `/`, `?` or `#` made 1.5.5's url unparsable: no credential.
+    if endpoint.password_at() == Some(PasswordAt::UserinfoUnencoded) {
+        return (cut_userinfo(text, ""), None);
+    }
+    let Ok(mut parsed) = url::Url::parse(text) else {
         // Not a URL the client can parse (1.5.5 accepted any string as the url): no credential is
         // made of it, and its userinfo never reaches the host's dial target.
-        return (cut_userinfo(endpoint, ""), None);
+        return (cut_userinfo(text, ""), None);
     };
     let username = parsed.username().to_string();
-    let password = parsed.password().map(str::to_string);
+    let password = endpoint.password();
     if username.is_empty() && password.is_none() {
-        return (endpoint.to_string(), None);
+        return (text.to_string(), None);
     }
     // The user-pass is an octet sequence (RFC 7617), and a userinfo escape encodes an octet (RFC
-    // 3986): the decoded bytes are base64ed as they are, never read as text first.
-    let mut user_pass = percent_decode(&username);
-    user_pass.push(b':');
-    user_pass.extend(percent_decode(password.as_deref().unwrap_or("")));
-    let token = base64(&user_pass);
+    // 3986): the decoded user is passed as its octets, never read as text first.
+    let user = percent_decode(&username);
     let clean = if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
         let host = parsed.host_str().unwrap_or("");
         match parsed.port() {
@@ -224,7 +227,22 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     } else {
         parsed.into()
     };
-    (clean, Some(format!("{BASIC}{token}")))
+    (
+        clean,
+        Some((user, password.cloned().unwrap_or_else(Cred::empty))),
+    )
+}
+
+/// `url` with its userinfo taken out (a string that is not a URL: cut as [`cut_userinfo`] cuts).
+fn without_userinfo(url: &str) -> String {
+    let Ok(mut u) = url::Url::parse(url) else {
+        return cut_userinfo(url, "");
+    };
+    if u.set_username("").is_ok() && u.set_password(None).is_ok() {
+        u.into()
+    } else {
+        cut_userinfo(url, "")
+    }
 }
 
 /// The request target `endpoint` names: its path and query (`/` when it has no path), or `/` when
@@ -259,12 +277,6 @@ fn cut_userinfo(url: &str, with: &str) -> String {
 /// written), through the `percent-encoding` crate.
 fn percent_decode(s: &str) -> Vec<u8> {
     percent_encoding::percent_decode_str(s).collect()
-}
-
-/// Standard base64 (RFC 4648 §4, `=`-padded), through the `base64` crate.
-fn base64(input: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(input)
 }
 
 #[cfg(test)]

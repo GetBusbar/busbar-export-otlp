@@ -30,6 +30,7 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
+use busbar_contract::abi::sdk::cred::{Cred, PasswordAt, Seal};
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
@@ -103,9 +104,10 @@ pub struct Endpoint {
     /// The collector the host dials — the settings' URL without its userinfo; `None` only for the
     /// default endpoint, which names none.
     pub collector: Option<String>,
-    /// The request target (path and query) and the `Authorization` the userinfo became; `None`
-    /// only for the default endpoint, which names none.
-    pub target: Option<(String, Option<String>)>,
+    /// The request target (path and query) and the userinfo (its user's octets and its sealed
+    /// password) the `Authorization` is made of; `None` only for the default endpoint, which names
+    /// none.
+    pub target: Option<(String, Option<(Vec<u8>, Cred)>)>,
     /// The parts of the settings' URL cut from the host's text before it is logged
     /// ([`secret_parts`]).
     pub secrets: Vec<String>,
@@ -131,28 +133,47 @@ impl Endpoint {
     pub fn of(settings: &OtlpSettings) -> Self {
         let (clean, authorization) = split_credentials(&settings.url);
         Self {
-            shown: log_target(&settings.url),
+            shown: log_target(settings.url.public()),
             target: Some((request_target(&clean), authorization)),
             collector: Some(clean),
-            secrets: secret_parts(&settings.url),
+            secrets: secret_parts(settings.url.public()),
+        }
+    }
+
+    /// `text` (the host's failure words, which may quote the target) with the target's parts
+    /// ([`secret_parts`]) and any echo of the sealed password taken out.
+    #[must_use]
+    pub fn quiet(&self, text: &str) -> String {
+        let text = scrub(text, &self.secrets);
+        match self.target.as_ref().and_then(|(_, a)| a.as_ref()) {
+            Some((_, password)) => password.redact_echo(&text),
+            None => text,
         }
     }
 
     /// The request carrying `body` to this endpoint; `None` when it names none.
     #[must_use]
-    pub fn request(&self, body: Vec<u8>) -> Option<Request> {
+    pub fn request(&self, body: Vec<u8>) -> Option<(Request, Vec<(usize, Vec<u8>, Seal)>)> {
         let (target, authorization) = self.target.as_ref()?;
-        let mut fields = vec![(b"content-type".to_vec(), CONTENT_TYPE.as_bytes().to_vec())];
-        if let Some(value) = authorization {
-            fields.push((b"authorization".to_vec(), value.as_bytes().to_vec()));
-        }
-        Some(Request {
+        let fields = vec![(b"content-type".to_vec(), CONTENT_TYPE.as_bytes().to_vec())];
+        let sealed = authorization
+            .iter()
+            .map(|(user, password)| {
+                (
+                    fields.len(),
+                    b"authorization".to_vec(),
+                    password.basic(user),
+                )
+            })
+            .collect();
+        let request = Request {
             method: b"POST".to_vec(),
             target: target.as_bytes().to_vec(),
             fields,
             body,
             timeout_ms: EXPORT_TIMEOUT_MS,
-        })
+        };
+        Some((request, sealed))
     }
 }
 
@@ -219,14 +240,13 @@ impl Run {
     /// framed for was replaced by a refresh) settles nothing.
     fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
         let shown = self.endpoint.shown.as_str();
-        let secrets = self.endpoint.secrets.as_slice();
         if !stale {
             let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
             match (result, *admitted) {
                 (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
                     tracing::error!(
                         "{}; disabling OTLP trace export",
-                        scrub(&e.to_string(), secrets)
+                        self.endpoint.quiet(&e.to_string())
                     );
                     *admitted = Some(false);
                     return;
@@ -245,7 +265,7 @@ impl Run {
                 status = reply.status,
                 "OTLP span export returned a non-2xx status; this batch was dropped"
             ),
-            Err(e) => dropped(shown, secrets, e),
+            Err(e) => dropped(&self.endpoint, e),
         }
     }
 }
@@ -260,9 +280,9 @@ pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
 fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
-    let settings =
-        OtlpSettings::parse(settings).map_err(|e| Refusal::failed(format!("settings: {e}")))?;
-    if let Some(refusal) = crate::ambiguous_url(&settings.url) {
+    let settings = OtlpSettings::parse(settings).map_err(|e| Refusal::failed(e.to_string()))?;
+    let unencoded = settings.url.password_at() == Some(PasswordAt::UserinfoUnencoded);
+    if let Some(refusal) = crate::ambiguous_url(settings.url.public(), unencoded) {
         return Err(Refusal::failed(refusal));
     }
     Ok(settings)
@@ -333,13 +353,13 @@ impl SafeSlot for Deliver {
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
-                let Some(request) = endpoint.request(body) else {
+                let Some((request, sealed)) = endpoint.request(body) else {
                     return Outcome::Ready;
                 };
-                match Exchange::request(request) {
+                match Exchange::request_sealed(request, sealed) {
                     Ok(state) => (state, run),
                     Err(e) => {
-                        dropped(&endpoint.shown, &endpoint.secrets, &e);
+                        dropped(endpoint, &e);
                         return Outcome::Ready;
                     }
                 }
@@ -372,10 +392,10 @@ impl SafeSlot for Deliver {
 
 /// The line an export that did not reach the collector writes, the host's text cut of the target's
 /// credential-bearing parts.
-fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
+fn dropped(endpoint: &Endpoint, error: &ConnFailure) {
     tracing::warn!(
-        endpoint = %shown,
-        error = %scrub(&error.to_string(), secrets),
+        endpoint = %endpoint.shown,
+        error = %endpoint.quiet(&error.to_string()),
         "OTLP span export failed; this batch was dropped"
     );
 }
