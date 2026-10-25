@@ -6,8 +6,8 @@
 //! doors is proven by `busbar-export-otlp-plugin`'s conformance test.
 
 use super::*;
-use busbar_contract::abi::sdk::cred::{CredUrl, Seal, UserinfoUrl};
-use busbar_contract::abi::sdk::exchange::Request;
+use busbar_contract::abi::sdk::cred::{CredUrl, UserinfoUrl};
+use busbar_contract::abi::sdk::exchange::{Request, SealedField};
 use busbar_contract::abi::sdk::test_support::chip::sealed_bytes;
 
 /// The credential split as the wire carries it: the `Authorization` the chip makes, read back
@@ -21,7 +21,7 @@ fn split_credentials(url: &str) -> (String, Option<String>) {
 }
 
 /// The request as the wire carries it: the sealed fields in their place.
-fn wire(r: Option<(Request, Vec<(usize, Vec<u8>, Seal)>)>) -> Option<Request> {
+fn wire(r: Option<(Request, Vec<SealedField>)>) -> Option<Request> {
     let (mut r, sealed) = r?;
     let public = std::mem::take(&mut r.fields);
     for at in 0..=public.len() {

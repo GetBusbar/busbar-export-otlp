@@ -30,15 +30,17 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
-use busbar_contract::abi::sdk::cred::{Cred, PasswordAt, Seal};
+use busbar_contract::abi::sdk::cred::PasswordAt;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::exchange::{
+    exchange, Exchange, ExchangeResponse, Request, SealedField,
+};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
     log_target, proto, request_target, scrub, secret_parts, split_credentials, OtlpSettings,
-    CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME,
+    Userinfo, CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME,
 };
 
 /// The one need's index in [`STATEMENT`]'s needs.
@@ -107,7 +109,7 @@ pub struct Endpoint {
     /// The request target (path and query) and the userinfo (its user's octets and its sealed
     /// password) the `Authorization` is made of; `None` only for the default endpoint, which names
     /// none.
-    pub target: Option<(String, Option<(Vec<u8>, Cred)>)>,
+    pub target: Option<(String, Option<Userinfo>)>,
     /// The parts of the settings' URL cut from the host's text before it is logged
     /// ([`secret_parts`]).
     pub secrets: Vec<String>,
@@ -153,7 +155,7 @@ impl Endpoint {
 
     /// The request carrying `body` to this endpoint; `None` when it names none.
     #[must_use]
-    pub fn request(&self, body: Vec<u8>) -> Option<(Request, Vec<(usize, Vec<u8>, Seal)>)> {
+    pub fn request(&self, body: Vec<u8>) -> Option<(Request, Vec<SealedField>)> {
         let (target, authorization) = self.target.as_ref()?;
         let fields = vec![(b"content-type".to_vec(), CONTENT_TYPE.as_bytes().to_vec())];
         let sealed = authorization

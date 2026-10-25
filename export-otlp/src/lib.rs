@@ -199,7 +199,10 @@ pub fn ambiguous_url(url: &str, unencoded: bool) -> Option<String> {
 /// sealed password)))` for the `Authorization: Basic` (RFC 7617) the chip makes of them, or
 /// `(endpoint, None)` when it carries none or is not a URL. What the request carries never holds
 /// the secret in its target.
-pub fn split_credentials(endpoint: &UserinfoUrl) -> (String, Option<(Vec<u8>, Cred)>) {
+/// A userinfo the `Authorization` is made of: its user's octets and its sealed password.
+pub type Userinfo = (Vec<u8>, Cred);
+
+pub fn split_credentials(endpoint: &UserinfoUrl) -> (String, Option<Userinfo>) {
     let text = endpoint.public();
     // A password holding an unescaped `/`, `?` or `#` made 1.5.5's url unparsable: no credential.
     if endpoint.password_at() == Some(PasswordAt::UserinfoUnencoded) {
