@@ -647,7 +647,8 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
 
     // The log: enabled on the first carried export of each instance and again after the refresh
     // that moved its target (the need is re-declared), the record that is no span
-    // at debug, every dropped export at warn, the endpoint always masked; a refused target disabled.
+    // at debug, every dropped export at warn, the endpoint always masked (userinfo, and any path but
+    // OTLP's own `/v1/traces`, CREDENTIAL-LOCKDOWN H3); a refused target disabled.
     let lines: Vec<String> = linked["lines"]
         .as_array()
         .unwrap()
@@ -667,12 +668,12 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
         "{all}"
     );
     assert_eq!(
-        count("OTLP tracing enabled endpoint=http://127.0.0.1:4318/v2/traces"),
+        count("OTLP tracing enabled endpoint=http://127.0.0.1:4318/***"),
         1,
         "{all}"
     );
     assert_eq!(
-        count("OTLP tracing enabled endpoint=https://***@collector.example/fail"),
+        count("OTLP tracing enabled endpoint=https://***@collector.example/***"),
         1,
         "{all}"
     );
