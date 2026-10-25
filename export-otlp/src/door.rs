@@ -263,15 +263,18 @@ impl Life for Otlp {
     }
 }
 
-/// The OTLP request a JSON-lines batch makes, each record that is no span logged and skipped.
+/// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped.
 fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
-    let records: Vec<serde_json::Value> = batch
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    for line in batch
         .split(|b| *b == b'\n')
         .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-        .map(|line| serde_json::from_slice(line).unwrap_or_default())
-        .collect();
-    for _ in records.iter().filter(|r| !proto::is_span(r)) {
-        tracing::debug!("OTLP span export skipped a record with no span identity");
+    {
+        match serde_json::from_slice::<serde_json::Value>(line) {
+            Ok(record) if proto::is_span(&record) => records.push(record),
+            Ok(_) => tracing::debug!("OTLP span export skipped a record with no span identity"),
+            Err(_) => tracing::debug!("OTLP span export skipped a line that is not JSON"),
+        }
     }
     proto::export_request(&records)
 }
@@ -441,3 +444,7 @@ pub use table::door;
 /// The door as the macro built it, for the contract's test support (`DoorView::of`).
 #[cfg(test)]
 pub(crate) use table::MACRO_DOOR;
+
+#[cfg(test)]
+#[path = "door_tests.rs"]
+mod tests;
