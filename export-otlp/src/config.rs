@@ -30,9 +30,13 @@ impl OtlpSettings {
     /// The settings `bytes` hold, refused in the configuration grammar's words (`unknown field …`,
     /// `missing field `url``), as 1.5.x read them from the configuration's own value.
     ///
+    /// Empty settings read as `{}` (the SDK's `settings_object` rule), so they are refused for the
+    /// missing `url`, not as JSON that ended early.
+    ///
     /// # Errors
     /// The bytes are not JSON, or not this shape.
     pub fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        let bytes = if bytes.is_empty() { b"{}" } else { bytes };
         serde_json::from_value(serde_json::from_slice(bytes)?)
     }
 }
