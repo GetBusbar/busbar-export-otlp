@@ -71,7 +71,8 @@ pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
 const BASIC: &str = "Basic ";
 
 /// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
-/// a URL with none, or a string that is not a URL, unchanged.
+/// a URL with none unchanged. A string that is not a URL but carries `scheme://userinfo@…` has its
+/// userinfo cut the same way (`cut_userinfo`); one without is unchanged.
 pub fn mask_userinfo(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return cut_userinfo(url, "***@");
