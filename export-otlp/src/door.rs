@@ -14,7 +14,7 @@
 //! * `scrape` and `serve` — REFUSED: the sink carries no metrics and serves no route.
 //! * `status` and `check` — READY with nothing to report.
 
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
@@ -152,24 +152,57 @@ impl Endpoint {
     }
 }
 
-/// One opened instance.
+/// One run of the sink: an endpoint and whether the host's first answer admitted it. A refresh
+/// starts a new one, so an answer for the endpoint it replaced cannot settle it.
 #[derive(Debug)]
-pub struct Otlp {
-    endpoint: RwLock<Endpoint>,
+struct Run {
+    endpoint: Endpoint,
     /// Whether this run takes spans, once the host's first answer settled it.
     admitted: Mutex<Option<bool>>,
 }
 
+/// A delivery parked on the host: its exchange, and the run it was framed for, so its answer is
+/// settled and logged as that run's even when a refresh lands while it is parked.
+struct Parked {
+    exchange: Exchange,
+    run: Arc<Run>,
+}
+
+/// One opened instance.
+#[derive(Debug)]
+pub struct Otlp {
+    run: RwLock<Arc<Run>>,
+}
+
 impl Otlp {
+    fn start(endpoint: Endpoint) -> Arc<Run> {
+        Arc::new(Run {
+            endpoint,
+            admitted: Mutex::new(None),
+        })
+    }
+
+    /// The current run.
+    fn run(&self) -> Arc<Run> {
+        Arc::clone(&self.run.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
     /// The endpoint this instance sends to.
     #[must_use]
     pub fn endpoint(&self) -> Endpoint {
-        self.endpoint
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.run().endpoint.clone()
     }
 
+    /// What became of one export framed for `run`. A refresh since then makes the answer a stale
+    /// one: it settles nothing and says nothing of the current run, and is logged as a dropped
+    /// export at debug.
+    fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
+        let stale = !Arc::ptr_eq(run, &self.run());
+        run.settle(stale, result);
+    }
+}
+
+impl Run {
     /// Whether the host refused this run's exports: its connector refused the first one (the
     /// egress class's verdict on the target, or no connector at all).
     fn refused(&self) -> bool {
@@ -178,9 +211,11 @@ impl Otlp {
 
     /// What became of one export: the first answer the host gives settles whether this run takes
     /// spans (the line a rollout check greps for, or the refusal and that export is disabled); a
-    /// non-2xx or failed export drops that batch, logged at debug.
-    fn settle(&self, shown: &str, result: &Result<ExchangeResponse, ConnFailure>) {
-        {
+    /// non-2xx or failed export drops that batch, logged at debug. A `stale` answer (the run it was
+    /// framed for was replaced by a refresh) settles nothing.
+    fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
+        let shown = self.endpoint.shown.as_str();
+        if !stale {
             let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
             match (result, *admitted) {
                 (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
@@ -218,17 +253,13 @@ impl Life for Otlp {
 
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            endpoint: RwLock::new(Endpoint::of(settings)),
-            admitted: Mutex::new(None),
+            run: RwLock::new(Self::start(Endpoint::of(settings))),
         })
     }
 
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
-        *self
-            .endpoint
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Endpoint::of(settings);
-        *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *self.run.write().unwrap_or_else(PoisonError::into_inner) =
+            Self::start(Endpoint::of(settings));
         Ok(Refreshed::default())
     }
 }
@@ -261,13 +292,17 @@ impl SafeSlot for Deliver {
         let Some(held) = instance.get() else {
             return Outcome::Refused;
         };
-        let endpoint = held.life().endpoint();
-        let mut state = match instance.resume::<Exchange>() {
-            Some(parked) => *parked,
+        let (mut state, run) = match instance.resume::<Parked>() {
+            Some(parked) => {
+                let Parked { exchange, run } = *parked;
+                (exchange, run)
+            }
             None => {
-                if held.life().refused() {
+                let run = held.life().run();
+                if run.refused() {
                     return Outcome::Ready;
                 }
+                let endpoint = &run.endpoint;
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
@@ -275,7 +310,7 @@ impl SafeSlot for Deliver {
                     return Outcome::Ready;
                 };
                 match Exchange::request(request) {
-                    Ok(state) => state,
+                    Ok(state) => (state, run),
                     Err(e) => {
                         dropped(&endpoint.shown, &e);
                         return Outcome::Ready;
@@ -288,17 +323,20 @@ impl SafeSlot for Deliver {
                 &mut host.connector(instance.ticket()),
                 &mut state,
                 NEED,
-                endpoint.collector.as_deref(),
+                run.endpoint.collector.as_deref(),
             ),
             None => Poll::Ready(Err(ConnFailure::Unarmed)),
         };
         match answer {
             Poll::Pending => {
-                instance.park(state);
+                instance.park(Parked {
+                    exchange: state,
+                    run,
+                });
                 Outcome::Pending
             }
             Poll::Ready(result) => {
-                held.life().settle(&endpoint.shown, &result);
+                held.life().settle(&run, &result);
                 Outcome::Ready
             }
         }
@@ -400,3 +438,7 @@ mod table {
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
 pub use table::door;
+
+/// The door as the macro built it, for the contract's test support (`DoorView::of`).
+#[cfg(test)]
+pub(crate) use table::MACRO_DOOR;

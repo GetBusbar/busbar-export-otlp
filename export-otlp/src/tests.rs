@@ -532,3 +532,105 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
         assert!(!text.contains("hunter2"), "{text}");
     }
 }
+
+/// A refresh that lands while a delivery is parked on the host must not let that delivery's answer
+/// settle the NEW run (design A). The connector double pends the first ESTABLISH and refuses the
+/// resume of it; after a refresh to another collector, a fresh delivery must still reach the
+/// connector. RED before the fix: the stale refusal disabled the refreshed run, so no ESTABLISH.
+#[test]
+fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
+    use busbar_contract::abi::export::{DeliverIn, Ops};
+    use busbar_contract::abi::host::conn::connector::EstablishIn;
+    use busbar_contract::abi::mechanism::call::{OutHead, Outcome, BLOB_JSONL, FLAG_RESUME};
+    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut, RefreshIn};
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_contract::abi::sdk::test_support::reply::{call_hosted_in, call_in};
+    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
+    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);
+
+    /// The connector: the first ESTABLISH pends, every later one (the resume's included) is refused.
+    struct Connector;
+    impl FakeService for Connector {
+        type In = EstablishIn;
+        fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
+            if ESTABLISHES.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Outcome::Pending;
+            }
+            call.set_error("the test connector refuses this target");
+            Outcome::Refused
+        }
+    }
+
+    let batch = br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
+    let view = DoorView::of(door::MACRO_DOOR);
+    let op =
+        |pick: fn(&'static Ops) -> &'static Option<busbar_contract::abi::mechanism::call::Op>| {
+            view.op::<Ops>(pick).expect("the door states the slot")
+        };
+    let host = FakeHost::new().serve(fake::conn::ESTABLISH, Connector);
+
+    let a = br#"{"url":"https://a.example/v1/traces"}"#;
+    let open_in = TestIn::<OpenIn>::new()
+        .set(|i| &i.head.op, slot::OPEN)
+        .settings(a);
+    let mut opened = call_hosted_in(
+        op(|t| &t.head.open),
+        None,
+        &host.lend_in(open_in),
+        zeroed::<OpenOut>(),
+    );
+    assert_eq!(opened.outcome, Outcome::Ready);
+    let instance = opened.take_instance().expect("open answered an instance");
+
+    let deliver_slot = op(|t| &t.deliver).index();
+    let deliver = |ticket: u32, flags: u32| {
+        let input = TestIn::<DeliverIn>::new()
+            .set(|i| &i.head.op, deliver_slot)
+            .set(|i| &i.head.flags, flags)
+            .set(
+                |i| &i.head.ticket,
+                Ticket {
+                    slot: ticket,
+                    generation: 1,
+                },
+            )
+            .blob(|i| &i.batch, batch, BLOB_JSONL);
+        call_in(
+            op(|t| &t.deliver),
+            Some(&instance),
+            &input,
+            zeroed::<OutHead>(),
+        )
+        .outcome
+    };
+
+    // Delivery 1 parks on the host (the first ESTABLISH pends) ...
+    assert_eq!(deliver(1, 0), Outcome::Pending);
+    // ... a refresh moves the collector while it is parked ...
+    let b = br#"{"url":"https://b.example/v1/traces"}"#;
+    let refresh_in = TestIn::<RefreshIn>::new()
+        .set(|i| &i.head.op, slot::REFRESH)
+        .settings(b);
+    let refreshed = call_in(
+        op(|t| &t.head.refresh),
+        Some(&instance),
+        &refresh_in,
+        zeroed::<OutHead>(),
+    );
+    assert_eq!(refreshed.outcome, Outcome::Ready);
+    // ... and the host resumes delivery 1: its connector refuses it.
+    assert_eq!(deliver(1, FLAG_RESUME), Outcome::Ready);
+    assert_eq!(ESTABLISHES.load(Ordering::SeqCst), 2);
+
+    // The refresh made a new run: a fresh delivery reaches the connector again.
+    let _ = deliver(2, 0);
+    assert_eq!(
+        ESTABLISHES.load(Ordering::SeqCst),
+        3,
+        "a fresh delivery after the refresh reached the connector (the stale answer left the refreshed run open)"
+    );
+}
