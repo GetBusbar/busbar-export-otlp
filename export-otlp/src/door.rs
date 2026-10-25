@@ -13,7 +13,9 @@
 //!   debug). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
 //!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
 //! * `scrape` and `serve` — REFUSED: the sink carries no metrics and serves no route.
-//! * `status` and `check` — READY with nothing to report.
+//! * `status` — READY with nothing to report.
+//! * `check` — READY with nothing to report, except at the limits phase, where it returns the
+//!   one-instance refusal findings ([`crate::check_limits`]).
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
