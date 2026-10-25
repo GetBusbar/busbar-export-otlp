@@ -10,9 +10,9 @@
 //!   instance as it was.
 //! * `deliver` — the batch's spans as one OTLP request, sent by `exchange()` over the declared need,
 //!   PENDING while the host carries it; READY whatever became of it (a dropped export is logged at
-//!   debug). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
+//!   warn). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
 //!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
-//! * `scrape` and `serve` — REFUSED: the sink carries no metrics and serves no route.
+//! * `scrape` and `serve` — REFUSED, saying why: the sink carries no metrics and serves no route.
 //! * `status` — READY with nothing to report.
 //! * `check` — READY with nothing to report, except at the limits phase, where it returns the
 //!   one-instance refusal findings ([`crate::check_limits`]).
@@ -199,7 +199,7 @@ impl Otlp {
 
     /// What became of one export framed for `run`. A refresh since then makes the answer a stale
     /// one: it settles nothing and says nothing of the current run. A stale failure or non-2xx
-    /// answer is logged at debug as a dropped export; a stale success says nothing.
+    /// answer is logged at warn as a dropped export; a stale success says nothing.
     fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
         let stale = !Arc::ptr_eq(run, &self.run());
         run.settle(stale, result);
@@ -215,7 +215,7 @@ impl Run {
 
     /// What became of one export: the first answer the host gives settles whether this run takes
     /// spans (the line a rollout check greps for, or the refusal and that export is disabled); a
-    /// non-2xx or failed export drops that batch, logged at debug. A `stale` answer (the run it was
+    /// non-2xx or failed export drops that batch, logged at warn. A `stale` answer (the run it was
     /// framed for was replaced by a refresh) settles nothing.
     fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
         let shown = self.endpoint.shown.as_str();
@@ -240,7 +240,7 @@ impl Run {
         }
         match result {
             Ok(reply) if (200..300).contains(&reply.status) => {}
-            Ok(reply) => tracing::debug!(
+            Ok(reply) => tracing::warn!(
                 endpoint = %shown,
                 status = reply.status,
                 "OTLP span export returned a non-2xx status; this batch was dropped"
@@ -250,9 +250,22 @@ impl Run {
     }
 }
 
+/// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
+/// instead of a bare outcome.
+pub const NO_INSTANCE: &str = "no opened otlp instance";
+/// `scrape` on a push sink: it carries no `metrics` stream.
+pub const NO_EXPOSITION: &str = "this sink carries no metrics stream, so it renders no exposition";
+/// `serve` on a sink that declares no route.
+pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request";
+
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
 fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
-    OtlpSettings::parse(settings).map_err(|e| Refusal::failed(format!("settings: {e}")))
+    let settings =
+        OtlpSettings::parse(settings).map_err(|e| Refusal::failed(format!("settings: {e}")))?;
+    if let Some(refusal) = crate::ambiguous_url(&settings.url) {
+        return Err(Refusal::failed(refusal));
+    }
+    Ok(settings)
 }
 
 impl Life for Otlp {
@@ -301,10 +314,10 @@ impl SafeSlot for Deliver {
     fn call(
         instance: Instance<'_, Held<Otlp>>,
         input: Lent<'_, DeliverIn>,
-        _: Out<'_, OutHead>,
+        mut out: Out<'_, OutHead>,
     ) -> Outcome {
         let Some(held) = instance.get() else {
-            return Outcome::Refused;
+            return out.fail(Refusal::refused(NO_INSTANCE));
         };
         let (mut state, run) = match instance.resume::<Parked>() {
             Some(parked) => {
@@ -360,22 +373,26 @@ impl SafeSlot for Deliver {
 /// The line an export that did not reach the collector writes, the host's text cut of the target's
 /// credential-bearing parts.
 fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
-    tracing::debug!(
+    tracing::warn!(
         endpoint = %shown,
         error = %scrub(&error.to_string(), secrets),
         "OTLP span export failed; this batch was dropped"
     );
 }
 
-/// `scrape`: REFUSED — the sink carries no metrics.
+/// `scrape`: REFUSED, saying why — the sink carries no metrics.
 pub struct Scrape;
 
 impl SafeSlot for Scrape {
     type In = ScrapeIn;
     type Out = ScrapeOut;
     type State = Held<Otlp>;
-    fn call(_: Instance<'_, Held<Otlp>>, _: Lent<'_, ScrapeIn>, _: Out<'_, ScrapeOut>) -> Outcome {
-        Outcome::Refused
+    fn call(
+        _: Instance<'_, Held<Otlp>>,
+        _: Lent<'_, ScrapeIn>,
+        mut out: Out<'_, ScrapeOut>,
+    ) -> Outcome {
+        out.fail(Refusal::refused(NO_EXPOSITION))
     }
 }
 
@@ -406,7 +423,7 @@ impl SafeSlot for Check {
         mut out: Out<'_, CheckOut>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
-            return Outcome::Refused;
+            return out.fail(Refusal::refused(NO_INSTANCE));
         };
         if input.phase != CHECK_PHASE_LIMITS {
             return Outcome::Ready;
@@ -425,15 +442,19 @@ impl SafeSlot for Check {
     }
 }
 
-/// `serve`: REFUSED — the sink serves no route.
+/// `serve`: REFUSED, saying why — the sink serves no route.
 pub struct Serve;
 
 impl SafeSlot for Serve {
     type In = ServeIn;
     type Out = ServeOut;
     type State = Held<Otlp>;
-    fn call(_: Instance<'_, Held<Otlp>>, _: Lent<'_, ServeIn>, _: Out<'_, ServeOut>) -> Outcome {
-        Outcome::Refused
+    fn call(
+        _: Instance<'_, Held<Otlp>>,
+        _: Lent<'_, ServeIn>,
+        mut out: Out<'_, ServeOut>,
+    ) -> Outcome {
+        out.fail(Refusal::refused(NO_ROUTE))
     }
 }
 
