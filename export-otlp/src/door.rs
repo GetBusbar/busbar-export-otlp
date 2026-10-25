@@ -6,15 +6,18 @@
 //!
 //! * `validate` — the settings parse as [`OtlpSettings`], refusing in serde's words.
 //! * `open` / `refresh` — the settings become the endpoint (userinfo split into a Basic header).
-//!   Settings that do not parse still open, taking nothing: the configuration refused them.
+//!   Settings that do not parse are refused in `validate`'s words; a refused `refresh` leaves the
+//!   instance as it was.
 //! * `deliver` — the batch's spans as one OTLP request, sent by `exchange()` over the declared need,
 //!   PENDING while the host carries it; READY whatever became of it (a dropped export is logged at
 //!   debug). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
 //!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
 //! * `scrape` and `serve` — REFUSED: the sink carries no metrics and serves no route.
-//! * `status` and `check` — READY with nothing to report.
+//! * `status` — READY with nothing to report.
+//! * `check` — READY with nothing to report, except at the limits phase, where it returns the
+//!   one-instance refusal findings ([`crate::check_limits`]).
 
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
@@ -95,11 +98,11 @@ pub const STATEMENT: Statement = Statement {
 pub struct Endpoint {
     /// The settings' URL, userinfo masked: what every line names.
     pub shown: String,
-    /// The collector the host dials — the settings' URL without its userinfo; `None` when the
-    /// settings did not parse.
+    /// The collector the host dials — the settings' URL without its userinfo; `None` only for the
+    /// default endpoint, which names none.
     pub collector: Option<String>,
     /// The request target (path and query) and the `Authorization` the userinfo became; `None`
-    /// when the settings did not parse.
+    /// only for the default endpoint, which names none.
     pub target: Option<(String, Option<String>)>,
 }
 
@@ -120,17 +123,12 @@ impl std::fmt::Debug for Endpoint {
 impl Endpoint {
     /// The endpoint `settings` name.
     #[must_use]
-    pub fn of(settings: &[u8]) -> Self {
-        match OtlpSettings::parse(settings) {
-            Ok(s) => {
-                let (clean, authorization) = split_credentials(&s.url);
-                Self {
-                    shown: mask_userinfo(&s.url),
-                    target: Some((request_target(&clean), authorization)),
-                    collector: Some(clean),
-                }
-            }
-            Err(_) => Self::default(),
+    pub fn of(settings: &OtlpSettings) -> Self {
+        let (clean, authorization) = split_credentials(&settings.url);
+        Self {
+            shown: mask_userinfo(&settings.url),
+            target: Some((request_target(&clean), authorization)),
+            collector: Some(clean),
         }
     }
 
@@ -152,24 +150,57 @@ impl Endpoint {
     }
 }
 
-/// One opened instance.
+/// One run of the sink: an endpoint and whether the host's first answer admitted it. A refresh
+/// starts a new one, so an answer for the endpoint it replaced cannot settle it.
 #[derive(Debug)]
-pub struct Otlp {
-    endpoint: RwLock<Endpoint>,
+struct Run {
+    endpoint: Endpoint,
     /// Whether this run takes spans, once the host's first answer settled it.
     admitted: Mutex<Option<bool>>,
 }
 
+/// A delivery parked on the host: its exchange, and the run it was framed for, so its answer is
+/// settled and logged as that run's even when a refresh lands while it is parked.
+struct Parked {
+    exchange: Exchange,
+    run: Arc<Run>,
+}
+
+/// One opened instance.
+#[derive(Debug)]
+pub struct Otlp {
+    run: RwLock<Arc<Run>>,
+}
+
 impl Otlp {
+    fn start(endpoint: Endpoint) -> Arc<Run> {
+        Arc::new(Run {
+            endpoint,
+            admitted: Mutex::new(None),
+        })
+    }
+
+    /// The current run.
+    fn run(&self) -> Arc<Run> {
+        Arc::clone(&self.run.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
     /// The endpoint this instance sends to.
     #[must_use]
     pub fn endpoint(&self) -> Endpoint {
-        self.endpoint
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.run().endpoint.clone()
     }
 
+    /// What became of one export framed for `run`. A refresh since then makes the answer a stale
+    /// one: it settles nothing and says nothing of the current run. A stale failure or non-2xx
+    /// answer is logged at debug as a dropped export; a stale success says nothing.
+    fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
+        let stale = !Arc::ptr_eq(run, &self.run());
+        run.settle(stale, result);
+    }
+}
+
+impl Run {
     /// Whether the host refused this run's exports: its connector refused the first one (the
     /// egress class's verdict on the target, or no connector at all).
     fn refused(&self) -> bool {
@@ -178,9 +209,11 @@ impl Otlp {
 
     /// What became of one export: the first answer the host gives settles whether this run takes
     /// spans (the line a rollout check greps for, or the refusal and that export is disabled); a
-    /// non-2xx or failed export drops that batch, logged at debug.
-    fn settle(&self, shown: &str, result: &Result<ExchangeResponse, ConnFailure>) {
-        {
+    /// non-2xx or failed export drops that batch, logged at debug. A `stale` answer (the run it was
+    /// framed for was replaced by a refresh) settles nothing.
+    fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
+        let shown = self.endpoint.shown.as_str();
+        if !stale {
             let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
             match (result, *admitted) {
                 (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
@@ -207,41 +240,43 @@ impl Otlp {
     }
 }
 
+/// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
+fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
+    OtlpSettings::parse(settings).map_err(|e| Refusal::failed(format!("settings: {e}")))
+}
+
 impl Life for Otlp {
     const CANCEL: u32 = cancel::ABORTED;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        OtlpSettings::parse(settings)
-            .map(|_| ())
-            .map_err(|e| Refusal::failed(format!("settings: {e}")))
+        parsed(settings).map(|_| ())
     }
 
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            endpoint: RwLock::new(Endpoint::of(settings)),
-            admitted: Mutex::new(None),
+            run: RwLock::new(Self::start(Endpoint::of(&parsed(settings)?))),
         })
     }
 
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
-        *self
-            .endpoint
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Endpoint::of(settings);
-        *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let endpoint = Endpoint::of(&parsed(settings)?);
+        *self.run.write().unwrap_or_else(PoisonError::into_inner) = Self::start(endpoint);
         Ok(Refreshed::default())
     }
 }
 
-/// The OTLP request a JSON-lines batch makes, each record that is no span logged and skipped.
+/// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped.
 fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
-    let records: Vec<serde_json::Value> = batch
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    for line in batch
         .split(|b| *b == b'\n')
         .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-        .map(|line| serde_json::from_slice(line).unwrap_or_default())
-        .collect();
-    for _ in records.iter().filter(|r| !proto::is_span(r)) {
-        tracing::debug!("OTLP span export skipped a record with no span identity");
+    {
+        match serde_json::from_slice::<serde_json::Value>(line) {
+            Ok(record) if proto::is_span(&record) => records.push(record),
+            Ok(_) => tracing::debug!("OTLP span export skipped a record with no span identity"),
+            Err(_) => tracing::debug!("OTLP span export skipped a line that is not JSON"),
+        }
     }
     proto::export_request(&records)
 }
@@ -261,13 +296,17 @@ impl SafeSlot for Deliver {
         let Some(held) = instance.get() else {
             return Outcome::Refused;
         };
-        let endpoint = held.life().endpoint();
-        let mut state = match instance.resume::<Exchange>() {
-            Some(parked) => *parked,
+        let (mut state, run) = match instance.resume::<Parked>() {
+            Some(parked) => {
+                let Parked { exchange, run } = *parked;
+                (exchange, run)
+            }
             None => {
-                if held.life().refused() {
+                let run = held.life().run();
+                if run.refused() {
                     return Outcome::Ready;
                 }
+                let endpoint = &run.endpoint;
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
@@ -275,7 +314,7 @@ impl SafeSlot for Deliver {
                     return Outcome::Ready;
                 };
                 match Exchange::request(request) {
-                    Ok(state) => state,
+                    Ok(state) => (state, run),
                     Err(e) => {
                         dropped(&endpoint.shown, &e);
                         return Outcome::Ready;
@@ -288,17 +327,20 @@ impl SafeSlot for Deliver {
                 &mut host.connector(instance.ticket()),
                 &mut state,
                 NEED,
-                endpoint.collector.as_deref(),
+                run.endpoint.collector.as_deref(),
             ),
             None => Poll::Ready(Err(ConnFailure::Unarmed)),
         };
         match answer {
             Poll::Pending => {
-                instance.park(state);
+                instance.park(Parked {
+                    exchange: state,
+                    run,
+                });
                 Outcome::Pending
             }
             Poll::Ready(result) => {
-                held.life().settle(&endpoint.shown, &result);
+                held.life().settle(&run, &result);
                 Outcome::Ready
             }
         }
@@ -400,3 +442,11 @@ mod table {
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
 pub use table::door;
+
+/// The door as the macro built it, for the contract's test support (`DoorView::of`).
+#[cfg(test)]
+pub(crate) use table::MACRO_DOOR;
+
+#[cfg(test)]
+#[path = "door_tests.rs"]
+mod tests;
