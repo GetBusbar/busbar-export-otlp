@@ -134,14 +134,16 @@ pub fn request_target(endpoint: &str) -> String {
 }
 
 /// A string `url::Url` refuses (an out-of-range port, an empty host) that still carries
-/// `scheme://userinfo@…`: everything between `://` and the authority's last `@` is replaced by
-/// `with` (its `@` included). A string with no such authority is returned unchanged.
+/// `scheme://userinfo@…`: everything between `://` and the LAST `@` anywhere after `://` is replaced
+/// by `with` (its `@` included) — a password may hold an unescaped `/`, `?` or `#`, so no delimiter
+/// bounds the authority here. A string with an `@` in its path or query is over-cut: accepted, for
+/// it is unparsable and leaking a secret is worse than a shortened line. A string with no `@` after
+/// `://` is returned unchanged.
 fn cut_userinfo(url: &str, with: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    match rest[..end].rfind('@') {
+    match rest.rfind('@') {
         Some(at) => format!("{scheme}://{with}{}", &rest[at + 1..]),
         None => url.to_string(),
     }
