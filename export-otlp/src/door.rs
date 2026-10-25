@@ -192,8 +192,8 @@ impl Otlp {
     }
 
     /// What became of one export framed for `run`. A refresh since then makes the answer a stale
-    /// one: it settles nothing and says nothing of the current run, and is logged as a dropped
-    /// export at debug.
+    /// one: it settles nothing and says nothing of the current run. A stale failure or non-2xx
+    /// answer is logged at debug as a dropped export; a stale success says nothing.
     fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
         let stale = !Arc::ptr_eq(run, &self.run());
         run.settle(stale, result);
