@@ -3,7 +3,7 @@
 
 //! ONE `traces` BATCH → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
 //! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded by `prost`
-//! (the fleet's protobuf library) over the eight messages it takes, declared here with their
+//! (the fleet's protobuf library) over the eleven messages it takes, declared here with their
 //! `.proto` field numbers. Not through `opentelemetry-proto`: that crate depends on `opentelemetry`
 //! and `opentelemetry_sdk` unconditionally (its `trace` feature turns on `opentelemetry_sdk/trace`),
 //! which would link the OpenTelemetry SDK, a tracer runtime this sink does not run, into the
@@ -145,8 +145,8 @@ struct KeyValue {
     value: Option<AnyValue>,
 }
 
-/// `AnyValue` (common/v1): its `string_value`, `bool_value`, `int_value` and `double_value`
-/// members, the ones this sink writes.
+/// `AnyValue` (common/v1): its `string_value`, `bool_value`, `int_value`, `double_value` and
+/// `array_value` members, the ones this sink writes.
 #[derive(Clone, PartialEq, prost::Message)]
 struct AnyValue {
     #[prost(oneof = "AnyValueKind", tags = "1, 2, 3, 4, 5")]
