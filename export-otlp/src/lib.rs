@@ -91,6 +91,90 @@ pub fn mask_userinfo(url: &str) -> String {
     parsed.into()
 }
 
+/// The OTLP/HTTP traces path (the specification's default), kept in a log line: it is not a secret.
+const OTLP_TRACES_PATH: &str = "/v1/traces";
+
+/// `url` as a log line or `Debug` names it (CREDENTIAL-LOCKDOWN H3): scheme, a masked userinfo, host
+/// and port. A path becomes `/***` unless it is `/` or OTLP's own `/v1/traces`, since a collector key
+/// may ride in the path. A query becomes `?***` (`?api-key=`). A fragment is dropped. A string that
+/// is not a URL keeps only its scheme and authority, userinfo cut.
+pub fn log_target(url: &str) -> String {
+    let Ok(u) = url::Url::parse(url) else {
+        let cut = cut_userinfo(url, "***@");
+        let Some((scheme, rest)) = cut.split_once("://") else {
+            return "***".to_string();
+        };
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let tail = if end < rest.len() { "/***" } else { "" };
+        return format!("{scheme}://{}{tail}", &rest[..end]);
+    };
+    let Some(host) = u.host_str() else {
+        return format!("{}:***", u.scheme());
+    };
+    let mut out = format!("{}://", u.scheme());
+    if !u.username().is_empty() || u.password().is_some() {
+        out.push_str("***@");
+    }
+    out.push_str(host);
+    if let Some(p) = u.port() {
+        out.push_str(&format!(":{p}"));
+    }
+    match u.path() {
+        "" | "/" => {}
+        OTLP_TRACES_PATH => out.push_str(OTLP_TRACES_PATH),
+        _ => out.push_str("/***"),
+    }
+    if u.query().is_some() {
+        out.push_str("?***");
+    }
+    out
+}
+
+/// The parts of `url` that can carry a credential, as [`scrub`] cuts them from foreign text: the URL
+/// as written and userinfo-masked, the URL without userinfo, its path (unless OTLP's own), query and
+/// userinfo, each also percent-decoded; longest first.
+pub fn secret_parts(url: &str) -> Vec<String> {
+    let mut parts = vec![
+        url.to_string(),
+        mask_userinfo(url),
+        split_credentials(url).0,
+    ];
+    if let Ok(u) = url::Url::parse(url) {
+        if !matches!(u.path(), "" | "/" | OTLP_TRACES_PATH) {
+            parts.push(u.path().to_string());
+        }
+        if let Some(q) = u.query().filter(|q| !q.is_empty()) {
+            parts.push(q.to_string());
+        }
+        if let Some(p) = u.password() {
+            parts.push(p.to_string());
+        }
+        parts.push(u.username().to_string());
+    }
+    let decoded: Vec<String> = parts
+        .iter()
+        .map(|p| String::from_utf8_lossy(&percent_decode(p)).into_owned())
+        .collect();
+    parts.extend(decoded);
+    parts.retain(|p| !p.is_empty());
+    parts.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    parts.dedup();
+    parts
+}
+
+/// `text` (the host's failure words, which may quote the target) with each of `parts`
+/// ([`secret_parts`]) replaced by `***`.
+#[must_use]
+pub fn scrub(text: &str, parts: &[String]) -> String {
+    let mut out = text.to_string();
+    for p in parts {
+        if out.contains(p.as_str()) {
+            out = out.replace(p.as_str(), "***");
+        }
+    }
+    out
+}
+
 /// THE AMBIGUOUS-URL REFUSAL (owner ruling 2026-10-24): `Some(the refusal)` when `url` parses but
 /// carries an `@` after its host — `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or

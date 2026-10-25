@@ -111,6 +111,69 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
     assert!(!otlp.run().refused());
 }
 
+// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H3) ────────────────────────────────────────────
+
+const CANARY: &str = "CANARY5e81bc";
+
+/// Every line logged while one instance's exports are carried, refused and dropped, for a target
+/// whose query and path carry a key, with the host's text quoting the target back.
+fn lines_for(url: &str) -> String {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let settings = crate::OtlpSettings {
+        url: url.to_string(),
+    };
+    let reply = |status| {
+        Ok(ExchangeResponse {
+            status,
+            ..ExchangeResponse::default()
+        })
+    };
+    let echo = format!("error sending request for url ({url}): connection reset");
+    let mut all = Vec::new();
+    // One run admitted, then a non-2xx and a host failure that quotes the URL.
+    let otlp = Otlp {
+        run: RwLock::new(Otlp::start(Endpoint::of(&settings))),
+    };
+    let run = otlp.run();
+    all.extend(captured(|| {
+        otlp.settle(&run, &reply(200));
+        otlp.settle(&run, &reply(503));
+        otlp.settle(&run, &Err(ConnFailure::Failed(echo.clone())));
+    }));
+    // A fresh run the host refuses, in words that quote the URL.
+    let otlp = Otlp {
+        run: RwLock::new(Otlp::start(Endpoint::of(&settings))),
+    };
+    let run = otlp.run();
+    all.extend(captured(|| {
+        otlp.settle(&run, &Err(ConnFailure::Refused(echo.clone())));
+    }));
+    let mut text: String = all.iter().map(|(m, f)| format!("{m}{f}\n")).collect();
+    text.push_str(&format!("{:?}\n{:?}\n", Endpoint::of(&settings), settings));
+    text
+}
+
+/// H3: the endpoint every line names kept the target's path and query, and the host's failure text
+/// was printed verbatim. A collector key in the query (`?api-key=`) or the path reached the log.
+#[test]
+fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
+    for url in [
+        format!("https://collector.example/v1/traces?api-key={CANARY}"),
+        format!("https://collector.example/{CANARY}/v1/traces"),
+        format!("https://u:{CANARY}@collector.example/v1/traces"),
+    ] {
+        let text = lines_for(&url);
+        assert!(
+            !text.contains(CANARY),
+            "{url}: a line carried the key:\n{text}"
+        );
+        assert!(
+            text.contains("collector.example"),
+            "{url}: the host is kept:\n{text}"
+        );
+    }
+}
+
 /// The (level, message) of every event logged while `f` runs on this thread.
 fn levelled(f: impl FnOnce()) -> Vec<(tracing::Level, String)> {
     use std::sync::{Arc, Mutex};
