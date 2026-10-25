@@ -41,3 +41,6 @@ tracing = { workspace = true }
 # checked against the proto's publisher, not against this crate's own encoder. Test-only.
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true, features = ["default"] }
+# The contract's test kit (a fake host and a door driven op by op, safe Rust): dev-only, so no shipped
+# image carries it.
+busbar-contract = { workspace = true, features = ["test-seal"] }
