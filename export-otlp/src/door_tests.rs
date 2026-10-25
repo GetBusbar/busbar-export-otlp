@@ -10,18 +10,18 @@ use std::sync::{PoisonError, RwLock};
 fn logged(f: impl FnOnce()) -> Vec<String> {
     captured(f)
         .into_iter()
-        .map(|(message, _)| message)
+        .map(|(_, message, _)| message)
         .collect()
 }
 
-/// The (message, ` key=value` fields) of every event logged while `f` runs on this thread.
-fn captured(f: impl FnOnce()) -> Vec<(String, String)> {
+/// The (level, message, ` key=value` fields) of every event logged while `f` runs on this thread.
+fn captured(f: impl FnOnce()) -> Vec<(tracing::Level, String, String)> {
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
 
-    struct Capture(Arc<Mutex<Vec<(String, String)>>>);
+    struct Capture(Arc<Mutex<Vec<(tracing::Level, String, String)>>>);
     struct Message(String, String);
     impl Visit for Message {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
@@ -44,7 +44,11 @@ fn captured(f: impl FnOnce()) -> Vec<(String, String)> {
         fn event(&self, event: &Event<'_>) {
             let mut message = Message(String::new(), String::new());
             event.record(&mut message);
-            self.0.lock().expect("lock").push((message.0, message.1));
+            let level = *event.metadata().level();
+            self.0
+                .lock()
+                .expect("lock")
+                .push((level, message.0, message.1));
         }
         fn enter(&self, _: &Id) {}
         fn exit(&self, _: &Id) {}
@@ -94,6 +98,7 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
     assert_eq!(
         lines,
         [(
+            tracing::Level::WARN,
             "OTLP span export failed; this batch was dropped".to_string(),
             " endpoint=https://a.example/v1/traces error=the egress class says no".to_string()
         )],
@@ -102,7 +107,7 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
     assert!(
         !lines
             .iter()
-            .any(|(m, _)| m.contains("disabling OTLP trace export")
+            .any(|(_, m, _)| m.contains("disabling OTLP trace export")
                 || m.contains("OTLP tracing enabled")),
         "a stale answer must not write a settling line"
     );
@@ -148,7 +153,7 @@ fn lines_for(url: &str) -> String {
     all.extend(captured(|| {
         otlp.settle(&run, &Err(ConnFailure::Refused(echo.clone())));
     }));
-    let mut text: String = all.iter().map(|(m, f)| format!("{m}{f}\n")).collect();
+    let mut text: String = all.iter().map(|(_, m, f)| format!("{m}{f}\n")).collect();
     text.push_str(&format!("{:?}\n{:?}\n", Endpoint::of(&settings), settings));
     text
 }
@@ -174,47 +179,6 @@ fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
     }
 }
 
-/// The (level, message) of every event logged while `f` runs on this thread.
-fn levelled(f: impl FnOnce()) -> Vec<(tracing::Level, String)> {
-    use std::sync::{Arc, Mutex};
-    use tracing::field::{Field, Visit};
-    use tracing::span::{Attributes, Id, Record};
-    use tracing::{Event, Metadata, Subscriber};
-
-    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
-    struct Message(String);
-    impl Visit for Message {
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.0 = format!("{value:?}");
-            }
-        }
-    }
-    impl Subscriber for Capture {
-        fn enabled(&self, _: &Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &Attributes<'_>) -> Id {
-            Id::from_u64(1)
-        }
-        fn record(&self, _: &Id, _: &Record<'_>) {}
-        fn record_follows_from(&self, _: &Id, _: &Id) {}
-        fn event(&self, event: &Event<'_>) {
-            let mut message = Message(String::new());
-            event.record(&mut message);
-            let level = *event.metadata().level();
-            self.0.lock().expect("lock").push((level, message.0));
-        }
-        fn enter(&self, _: &Id) {}
-        fn exit(&self, _: &Id) {}
-    }
-
-    let lines = Arc::new(Mutex::new(Vec::new()));
-    tracing::subscriber::with_default(Capture(Arc::clone(&lines)), f);
-    let lines = lines.lock().expect("lock").clone();
-    lines
-}
-
 /// RED before: a failed or non-2xx export was logged at DEBUG, so at the default level a lost batch
 /// said nothing. Every dropped export is a WARN line, as the request-log siblings warn theirs.
 #[test]
@@ -238,7 +202,7 @@ fn a_dropped_export_is_a_warn_line() {
         ..ExchangeResponse::default()
     });
     let failed = Err(ConnFailure::Failed("connection reset".into()));
-    let lines = levelled(|| {
+    let lines = captured(|| {
         otlp.settle(&run, &non_2xx);
         otlp.settle(&run, &failed);
     });
@@ -246,7 +210,7 @@ fn a_dropped_export_is_a_warn_line() {
     assert!(
         lines
             .iter()
-            .all(|(level, _)| *level == tracing::Level::WARN),
+            .all(|(level, _, _)| *level == tracing::Level::WARN),
         "{lines:?}"
     );
 }
