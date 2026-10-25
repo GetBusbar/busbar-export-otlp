@@ -553,11 +553,10 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     assert_eq!(linked["kind"], "Export");
     assert_eq!(linked["max_inflight"], 64);
     let validate = linked["validate"].as_array().unwrap();
-    assert!(
-        validate[0]
-            .as_str()
-            .unwrap()
-            .starts_with("Failed settings: EOF while parsing"),
+    // Empty settings read as `{}` (the SDK's rule, as every export sibling reads them): refused for
+    // the missing `url`, not as JSON that ended early.
+    assert_eq!(
+        validate[0], "Failed settings: missing field `url`",
         "{validate:?}"
     );
     assert_eq!(validate[1], "Failed settings: missing field `url`");
@@ -576,7 +575,12 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     assert_eq!(linked["open"], "Ready ");
     assert_eq!(
         linked["answers"],
-        json!({"scrape": "Refused ", "status": "Ready ", "check": "Ready ", "serve": "Refused "})
+        json!({
+            "scrape": format!("Refused {}", busbar_export_otlp::door::NO_EXPOSITION),
+            "status": "Ready ",
+            "check": "Ready ",
+            "serve": format!("Refused {}", busbar_export_otlp::door::NO_ROUTE),
+        })
     );
     assert_eq!(
         linked["deliver"],
@@ -643,7 +647,7 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
 
     // The log: enabled on the first carried export of each instance and again after the refresh
     // that moved its target (the need is re-declared), the record that is no span
-    // and every dropped export at debug, the endpoint always masked; a refused target disabled.
+    // at debug, every dropped export at warn, the endpoint always masked; a refused target disabled.
     let lines: Vec<String> = linked["lines"]
         .as_array()
         .unwrap()
@@ -688,11 +692,12 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
             .all(|l| l.starts_with("2 ")),
         "a refusal is an error line: {all}"
     );
-    // Severity wire values: info 0, debug 3. The rollout line is info; every dropped export is debug.
+    // Severity wire values: info 0, warn 1. The rollout line is info; every dropped export is warn,
+    // as the request-log siblings warn a dropped line: a lost batch is never silent.
     for (needle, severity) in [
         ("OTLP tracing enabled", "0 "),
-        ("returned a non-2xx status", "3 "),
-        ("OTLP span export failed", "3 "),
+        ("returned a non-2xx status", "1 "),
+        ("OTLP span export failed", "1 "),
     ] {
         assert!(
             lines
