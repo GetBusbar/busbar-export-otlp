@@ -18,8 +18,9 @@
 //! `exchange()` over it: `POST`, `content-type: application/x-protobuf`. The sink never dials.
 //! Credentials the operator embedded in the URL (`https://user:pass@collector/…`) never ride the
 //! request: they move into an `Authorization: Basic` header, and every line this sink writes masks
-//! them. A delivery is fire-and-forget and never retried; a refused, failed or non-2xx export drops
-//! that batch, logged at debug.
+//! them; a url whose credential would be misread as its host is refused ([`ambiguous_url`]). A
+//! delivery is fire-and-forget and never retried; a refused, failed or non-2xx export drops that
+//! batch, logged at warn.
 //!
 //! **Admission.** The host's connector judges every export against the need's egress class. Its
 //! first answer settles the run: refused, the sink logs `…; disabling OTLP trace export` and sends
@@ -172,6 +173,26 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
         }
     }
     out
+}
+
+/// THE AMBIGUOUS-URL REFUSAL (owner ruling 2026-10-24): `Some(the refusal)` when `url` parses but
+/// carries an `@` after its host — `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
+/// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
+/// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
+/// lines. The refusal shows the url with everything before its last `@` cut, never the credential.
+/// A url that does not parse, or has no `@` after its host, is not ambiguous here.
+pub fn ambiguous_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !parsed[url::Position::BeforePath..].contains('@') {
+        return None;
+    }
+    Some(format!(
+        "settings: url `{}` is ambiguous: it has an `@` after its host, so what comes before that \
+         `@` would be read as the host and path, not as a credential. Percent-encode a `/`, `?` or \
+         `#` inside the credential (`%2F`, `%3F`, `%23`), or write an `@` meant for the path as \
+         `%40`",
+        cut_userinfo(url, "***@")
+    ))
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
