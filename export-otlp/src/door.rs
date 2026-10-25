@@ -6,7 +6,8 @@
 //!
 //! * `validate` — the settings parse as [`OtlpSettings`], refusing in serde's words.
 //! * `open` / `refresh` — the settings become the endpoint (userinfo split into a Basic header).
-//!   Settings that do not parse still open, taking nothing: the configuration refused them.
+//!   Settings that do not parse are refused in `validate`'s words; a refused `refresh` leaves the
+//!   instance as it was.
 //! * `deliver` — the batch's spans as one OTLP request, sent by `exchange()` over the declared need,
 //!   PENDING while the host carries it; READY whatever became of it (a dropped export is logged at
 //!   debug). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
@@ -95,11 +96,11 @@ pub const STATEMENT: Statement = Statement {
 pub struct Endpoint {
     /// The settings' URL, userinfo masked: what every line names.
     pub shown: String,
-    /// The collector the host dials — the settings' URL without its userinfo; `None` when the
-    /// settings did not parse.
+    /// The collector the host dials — the settings' URL without its userinfo; `None` only for the
+    /// default endpoint, which names none.
     pub collector: Option<String>,
     /// The request target (path and query) and the `Authorization` the userinfo became; `None`
-    /// when the settings did not parse.
+    /// only for the default endpoint, which names none.
     pub target: Option<(String, Option<String>)>,
 }
 
@@ -120,17 +121,12 @@ impl std::fmt::Debug for Endpoint {
 impl Endpoint {
     /// The endpoint `settings` name.
     #[must_use]
-    pub fn of(settings: &[u8]) -> Self {
-        match OtlpSettings::parse(settings) {
-            Ok(s) => {
-                let (clean, authorization) = split_credentials(&s.url);
-                Self {
-                    shown: mask_userinfo(&s.url),
-                    target: Some((request_target(&clean), authorization)),
-                    collector: Some(clean),
-                }
-            }
-            Err(_) => Self::default(),
+    pub fn of(settings: &OtlpSettings) -> Self {
+        let (clean, authorization) = split_credentials(&settings.url);
+        Self {
+            shown: mask_userinfo(&settings.url),
+            target: Some((request_target(&clean), authorization)),
+            collector: Some(clean),
         }
     }
 
@@ -242,24 +238,27 @@ impl Run {
     }
 }
 
+/// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
+fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
+    OtlpSettings::parse(settings).map_err(|e| Refusal::failed(format!("settings: {e}")))
+}
+
 impl Life for Otlp {
     const CANCEL: u32 = cancel::ABORTED;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        OtlpSettings::parse(settings)
-            .map(|_| ())
-            .map_err(|e| Refusal::failed(format!("settings: {e}")))
+        parsed(settings).map(|_| ())
     }
 
     fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            run: RwLock::new(Self::start(Endpoint::of(settings))),
+            run: RwLock::new(Self::start(Endpoint::of(&parsed(settings)?))),
         })
     }
 
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
-        *self.run.write().unwrap_or_else(PoisonError::into_inner) =
-            Self::start(Endpoint::of(settings));
+        let endpoint = Endpoint::of(&parsed(settings)?);
+        *self.run.write().unwrap_or_else(PoisonError::into_inner) = Self::start(endpoint);
         Ok(Refreshed::default())
     }
 }
