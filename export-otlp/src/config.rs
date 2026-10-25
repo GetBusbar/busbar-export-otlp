@@ -8,8 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// `settings:` of an `export.<name>.module: otlp` instance. Its `Debug` masks the url's userinfo
-/// (the collector's Basic credential), as every line the sink writes masks it.
+/// `settings:` of an `export.<name>.module: otlp` instance. Its `Debug` names the url as every line
+/// the sink writes names it ([`crate::log_target`]): userinfo, a non-OTLP path and the query masked.
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpSettings {
@@ -21,7 +21,7 @@ pub struct OtlpSettings {
 impl std::fmt::Debug for OtlpSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OtlpSettings")
-            .field("url", &crate::mask_userinfo(&self.url))
+            .field("url", &crate::log_target(&self.url))
             .finish()
     }
 }

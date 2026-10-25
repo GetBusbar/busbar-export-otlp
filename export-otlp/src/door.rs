@@ -36,8 +36,8 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
-    mask_userinfo, proto, request_target, split_credentials, OtlpSettings, CONTENT_TYPE,
-    EXPORT_TIMEOUT_MS, NAME,
+    log_target, proto, request_target, scrub, secret_parts, split_credentials, OtlpSettings,
+    CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME,
 };
 
 /// The one need's index in [`STATEMENT`]'s needs.
@@ -93,10 +93,12 @@ pub const STATEMENT: Statement = Statement {
 };
 
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
-/// the `Authorization` the url's userinfo became is redacted.
+/// the collector is named as every line names it, the request target and the `Authorization` the
+/// url's userinfo became are redacted.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Endpoint {
-    /// The settings' URL, userinfo masked: what every line names.
+    /// The settings' URL as every line names it ([`log_target`]: userinfo, a non-OTLP path and the
+    /// query masked).
     pub shown: String,
     /// The collector the host dials — the settings' URL without its userinfo; `None` only for the
     /// default endpoint, which names none.
@@ -104,6 +106,9 @@ pub struct Endpoint {
     /// The request target (path and query) and the `Authorization` the userinfo became; `None`
     /// only for the default endpoint, which names none.
     pub target: Option<(String, Option<String>)>,
+    /// The parts of the settings' URL cut from the host's text before it is logged
+    /// ([`secret_parts`]).
+    pub secrets: Vec<String>,
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -111,12 +116,12 @@ impl std::fmt::Debug for Endpoint {
         let target = self
             .target
             .as_ref()
-            .map(|(path, authorization)| (path, authorization.as_ref().map(|_| "<redacted>")));
+            .map(|(_, authorization)| ("<redacted>", authorization.as_ref().map(|_| "<redacted>")));
         f.debug_struct("Endpoint")
             .field("shown", &self.shown)
-            .field("collector", &self.collector)
+            .field("collector", &self.collector.as_deref().map(log_target))
             .field("target", &target)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -126,9 +131,10 @@ impl Endpoint {
     pub fn of(settings: &OtlpSettings) -> Self {
         let (clean, authorization) = split_credentials(&settings.url);
         Self {
-            shown: mask_userinfo(&settings.url),
+            shown: log_target(&settings.url),
             target: Some((request_target(&clean), authorization)),
             collector: Some(clean),
+            secrets: secret_parts(&settings.url),
         }
     }
 
@@ -213,11 +219,15 @@ impl Run {
     /// framed for was replaced by a refresh) settles nothing.
     fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
         let shown = self.endpoint.shown.as_str();
+        let secrets = self.endpoint.secrets.as_slice();
         if !stale {
             let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
             match (result, *admitted) {
                 (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
-                    tracing::error!("{e}; disabling OTLP trace export");
+                    tracing::error!(
+                        "{}; disabling OTLP trace export",
+                        scrub(&e.to_string(), secrets)
+                    );
                     *admitted = Some(false);
                     return;
                 }
@@ -235,7 +245,7 @@ impl Run {
                 status = reply.status,
                 "OTLP span export returned a non-2xx status; this batch was dropped"
             ),
-            Err(e) => dropped(shown, e),
+            Err(e) => dropped(shown, secrets, e),
         }
     }
 }
@@ -316,7 +326,7 @@ impl SafeSlot for Deliver {
                 match Exchange::request(request) {
                     Ok(state) => (state, run),
                     Err(e) => {
-                        dropped(&endpoint.shown, &e);
+                        dropped(&endpoint.shown, &endpoint.secrets, &e);
                         return Outcome::Ready;
                     }
                 }
@@ -347,11 +357,12 @@ impl SafeSlot for Deliver {
     }
 }
 
-/// The line an export that did not reach the collector writes.
-fn dropped(shown: &str, error: &ConnFailure) {
+/// The line an export that did not reach the collector writes, the host's text cut of the target's
+/// credential-bearing parts.
+fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
     tracing::debug!(
         endpoint = %shown,
-        error = %error,
+        error = %scrub(&error.to_string(), secrets),
         "OTLP span export failed; this batch was dropped"
     );
 }
