@@ -532,3 +532,107 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
         assert!(!text.contains("hunter2"), "{text}");
     }
 }
+
+/// The `Span` the sink encodes `record` as, through the request it builds.
+fn span_of(record: &serde_json::Value) -> Option<Span> {
+    let bytes = proto::export_request([record])?;
+    Some(decoded(&bytes).resource_spans[0].scope_spans[0].spans[0].clone())
+}
+
+fn full(extra: serde_json::Value) -> serde_json::Value {
+    let mut span = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "n",
+        "start_ns": 1, "end_ns": 2,
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        span[k] = v.clone();
+    }
+    json!({ "span": span })
+}
+
+/// A full span record's status: absent and `unset` are the empty status (code 0, no message); an
+/// error with no message is code ERROR with an empty message; an error's message is kept.
+#[test]
+fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
+    let status =
+        |extra: serde_json::Value| span_of(&full(extra)).unwrap().status.unwrap_or_default();
+    for unset in [json!({}), json!({"status": {"code": "unset"}})] {
+        let s = status(unset);
+        assert_eq!((s.code, s.message.as_str()), (0, ""), "{s:?}");
+    }
+    let s = status(json!({"status": {"code": "error"}}));
+    assert_eq!((s.code, s.message.as_str()), (2, ""), "{s:?}");
+    let s = status(json!({"status": {"code": "error", "message": "boom"}}));
+    assert_eq!((s.code, s.message.as_str()), (2, "boom"), "{s:?}");
+}
+
+/// Real ids are high-entropy: the 16 hex digits are the exact 8 big-endian bytes (the trace id
+/// after 8 zero bytes), on the projected path and the full span's.
+#[test]
+fn high_entropy_ids_encode_to_their_exact_bytes() {
+    let tail = [0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
+    let mut trace = vec![0u8; 8];
+    trace.extend_from_slice(&tail);
+    let parent = [0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10];
+    let ids = json!({
+        "trace_id": "a1b2c3d4e5f60718", "span_id": "fedcba9876543210",
+        "parent_span_id": "fedcba9876543210",
+    });
+    let mut projected = json!({"name": "n"});
+    for (k, v) in ids.as_object().unwrap() {
+        projected[k] = v.clone();
+    }
+    let spanned = json!({"span": {"name": "n", "trace_id": ids["trace_id"], "span_id": ids["span_id"],
+        "parent_span_id": ids["parent_span_id"]}});
+    for record in [projected, spanned] {
+        let span = span_of(&record).expect("a span");
+        assert_eq!(span.trace_id, trace);
+        assert_eq!(span.span_id, parent);
+        assert_eq!(span.parent_span_id, parent);
+    }
+}
+
+/// Projected-attribute edges: a JSON null is no attribute; an integer past `i64::MAX` is an
+/// `int_value` with the same bits; a `start` near `u64::MAX` saturates instead of overflowing.
+#[test]
+fn projected_attribute_and_time_edges() {
+    let record = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "n",
+        "start": u64::MAX, "duration_us": u64::MAX,
+        "pool": null, "ingress": "i", "op": 18446744073709551615u64,
+    });
+    let span = span_of(&record).expect("a span");
+    assert_eq!(
+        span.attributes,
+        vec![
+            kv("ingress", "i"),
+            KeyValue {
+                key: "op".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::IntValue(-1)),
+                }),
+                ..Default::default()
+            },
+        ]
+    );
+    assert_eq!(span.start_time_unix_nano, u64::MAX);
+    assert_eq!(span.end_time_unix_nano, u64::MAX);
+}
+
+/// The `span` member wins: malformed ids in it are no span even beside valid projected ids; with
+/// both valid, the span member's name is the span's.
+#[test]
+fn the_span_member_wins_over_projected_fields() {
+    let bad = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "projected",
+        "span": {"trace_id": "nothex", "span_id": "0000000000000009", "name": "full"},
+    });
+    assert!(span_of(&bad).is_none());
+    assert!(!proto::is_span(&bad));
+    assert!(proto::export_request([&bad]).is_none());
+    let both = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "projected",
+        "span": {"trace_id": "0000000000000007", "span_id": "0000000000000009", "name": "full"},
+    });
+    assert_eq!(span_of(&both).unwrap().name, "full");
+}
