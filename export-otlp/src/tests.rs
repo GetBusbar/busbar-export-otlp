@@ -290,8 +290,12 @@ fn settings_refuse_in_the_grammars_words() {
 /// as `Authorization: Basic` instead; every line names the endpoint masked.
 #[test]
 fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
-    let endpoint =
-        Endpoint::of(br#"{"url":"https://us%40r:p%3Ass@collector.example:4318/v1/traces"}"#);
+    let endpoint = Endpoint::of(
+        &OtlpSettings::parse(
+            br#"{"url":"https://us%40r:p%3Ass@collector.example:4318/v1/traces"}"#,
+        )
+        .expect("parses"),
+    );
     assert_eq!(
         endpoint.shown,
         "https://***@collector.example:4318/v1/traces"
@@ -318,9 +322,6 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
             timeout_ms: 10_000,
         })
     );
-    // Settings that did not parse (the configuration refused them) send nothing.
-    assert_eq!(Endpoint::of(b"{}").request(vec![1]), None);
-    assert_eq!(Endpoint::of(b"").request(vec![1]), None);
 }
 
 /// The request target is the endpoint's path and query.
@@ -424,6 +425,32 @@ fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
     }
 }
 
+/// A password with an unescaped `/`, `?` or `#` makes the url unparsable (the text before it reads as
+/// a port) and ends a first-delimiter "authority" inside the password: the userinfo cut must still
+/// remove the whole password from the log form, the dial target and the settings Debug.
+#[test]
+fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
+    for (url, secret) in [
+        ("https://user:ab/cd==@collector.example/v1/traces", "ab/cd"),
+        ("https://user:ab#cd==@collector.example/v1/traces", "ab#cd"),
+        ("https://user:ab?cd==@collector.example/v1/traces", "ab?cd"),
+    ] {
+        assert!(url::Url::parse(url).is_err(), "{url} must be unparsable");
+        let masked = mask_userinfo(url);
+        assert!(!masked.contains(secret), "mask_userinfo leaked: {masked}");
+        let (clean, auth) = split_credentials(url);
+        assert!(!clean.contains(secret), "split_credentials leaked: {clean}");
+        assert_eq!(auth, None);
+        let debug = format!(
+            "{:?}",
+            config::OtlpSettings {
+                url: url.to_string()
+            }
+        );
+        assert!(!debug.contains(secret), "Debug leaked: {debug}");
+    }
+}
+
 /// THE ONE-INSTANCE REFUSAL, byte for byte the line busbar 1.5.5's `--validate` printed for a second
 /// `module: otlp` instance (busbar `tests/v1.5.5-validate/refusals.txt`): one line per instance after
 /// the first, naming the first; one instance, or none, is no finding.
@@ -474,7 +501,7 @@ fn the_need_is_pinned_to_the_url_setting() {
 fn no_collector_credential_renders_through_debug() {
     let raw = br#"{"url":"https://ops:hunter2@collector.example/v1/traces"}"#;
     let settings = crate::config::OtlpSettings::parse(raw).expect("parses");
-    let endpoint = crate::door::Endpoint::of(raw);
+    let endpoint = crate::door::Endpoint::of(&settings);
     assert!(
         endpoint.target.as_ref().is_some_and(|(_, a)| a.is_some()),
         "the userinfo became an Authorization"
@@ -526,9 +553,292 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
     assert!(!collector.contains("hunter2"), "{collector}");
     assert_eq!(auth, None);
     let raw = format!(r#"{{"url":"{url}"}}"#);
-    let endpoint = crate::door::Endpoint::of(raw.as_bytes());
     let settings = crate::config::OtlpSettings::parse(raw.as_bytes()).expect("parses");
+    let endpoint = crate::door::Endpoint::of(&settings);
     for text in [format!("{endpoint:?}"), format!("{settings:?}")] {
         assert!(!text.contains("hunter2"), "{text}");
     }
+}
+
+/// A refresh that lands while a delivery is parked on the host must not let that delivery's answer
+/// settle the NEW run (design A). The connector double pends the first ESTABLISH and refuses the
+/// resume of it; after a refresh to another collector, a fresh delivery must still reach the
+/// connector. RED before the fix: the stale refusal disabled the refreshed run, so no ESTABLISH.
+#[test]
+fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
+    use busbar_contract::abi::export::{DeliverIn, Ops};
+    use busbar_contract::abi::host::conn::connector::EstablishIn;
+    use busbar_contract::abi::mechanism::call::{OutHead, Outcome, BLOB_JSONL, FLAG_RESUME};
+    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut, RefreshIn};
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_contract::abi::sdk::test_support::reply::{call_hosted_in, call_in};
+    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
+    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);
+
+    /// The connector: the first ESTABLISH pends, every later one (the resume's included) is refused.
+    struct Connector;
+    impl FakeService for Connector {
+        type In = EstablishIn;
+        fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
+            if ESTABLISHES.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Outcome::Pending;
+            }
+            call.set_error("the test connector refuses this target");
+            Outcome::Refused
+        }
+    }
+
+    let batch = br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
+    let view = DoorView::of(door::MACRO_DOOR);
+    let op =
+        |pick: fn(&'static Ops) -> &'static Option<busbar_contract::abi::mechanism::call::Op>| {
+            view.op::<Ops>(pick).expect("the door states the slot")
+        };
+    let host = FakeHost::new().serve(fake::conn::ESTABLISH, Connector);
+
+    let a = br#"{"url":"https://a.example/v1/traces"}"#;
+    let open_in = TestIn::<OpenIn>::new()
+        .set(|i| &i.head.op, slot::OPEN)
+        .settings(a);
+    let mut opened = call_hosted_in(
+        op(|t| &t.head.open),
+        None,
+        &host.lend_in(open_in),
+        zeroed::<OpenOut>(),
+    );
+    assert_eq!(opened.outcome, Outcome::Ready);
+    let instance = opened.take_instance().expect("open answered an instance");
+
+    let deliver_slot = op(|t| &t.deliver).index();
+    let deliver = |ticket: u32, flags: u32| {
+        let input = TestIn::<DeliverIn>::new()
+            .set(|i| &i.head.op, deliver_slot)
+            .set(|i| &i.head.flags, flags)
+            .set(
+                |i| &i.head.ticket,
+                Ticket {
+                    slot: ticket,
+                    generation: 1,
+                },
+            )
+            .blob(|i| &i.batch, batch, BLOB_JSONL);
+        call_in(
+            op(|t| &t.deliver),
+            Some(&instance),
+            &input,
+            zeroed::<OutHead>(),
+        )
+        .outcome
+    };
+
+    // Delivery 1 parks on the host (the first ESTABLISH pends) ...
+    assert_eq!(deliver(1, 0), Outcome::Pending);
+    // ... a refresh moves the collector while it is parked ...
+    let b = br#"{"url":"https://b.example/v1/traces"}"#;
+    let refresh_in = TestIn::<RefreshIn>::new()
+        .set(|i| &i.head.op, slot::REFRESH)
+        .settings(b);
+    let refreshed = call_in(
+        op(|t| &t.head.refresh),
+        Some(&instance),
+        &refresh_in,
+        zeroed::<OutHead>(),
+    );
+    assert_eq!(refreshed.outcome, Outcome::Ready);
+    // ... and the host resumes delivery 1: its connector refuses it.
+    assert_eq!(deliver(1, FLAG_RESUME), Outcome::Ready);
+    assert_eq!(ESTABLISHES.load(Ordering::SeqCst), 2);
+
+    // The refresh made a new run: a fresh delivery reaches the connector again.
+    let _ = deliver(2, 0);
+    assert_eq!(
+        ESTABLISHES.load(Ordering::SeqCst),
+        3,
+        "a fresh delivery after the refresh reached the connector (the stale answer left the refreshed run open)"
+    );
+}
+
+/// A refresh over settings that do not parse is refused in `validate`'s words and leaves the
+/// instance as it was (design B). RED before the fix: the refresh answered READY and replaced the
+/// working endpoint with one that sends nothing, so no later delivery reached the connector.
+#[test]
+fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
+    use busbar_contract::abi::export::{DeliverIn, Ops};
+    use busbar_contract::abi::host::conn::connector::EstablishIn;
+    use busbar_contract::abi::mechanism::call::{OutHead, Outcome, BLOB_JSONL};
+    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut, RefreshIn};
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_contract::abi::sdk::test_support::reply::{call_hosted_in, call_in};
+    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
+    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);
+
+    /// The connector: counts the dials it is asked for, refusing each.
+    struct Connector;
+    impl FakeService for Connector {
+        type In = EstablishIn;
+        fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
+            ESTABLISHES.fetch_add(1, Ordering::SeqCst);
+            call.set_error("the test connector refuses this target");
+            Outcome::Refused
+        }
+    }
+
+    let batch = br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
+    let view = DoorView::of(door::MACRO_DOOR);
+    let host = FakeHost::new().serve(fake::conn::ESTABLISH, Connector);
+    let good = br#"{"url":"https://a.example/v1/traces"}"#;
+    let open_in = TestIn::<OpenIn>::new()
+        .set(|i| &i.head.op, slot::OPEN)
+        .settings(good);
+    let open = view.op::<Ops>(|t| &t.head.open).expect("open");
+    let mut opened = call_hosted_in(open, None, &host.lend_in(open_in), zeroed::<OpenOut>());
+    assert_eq!(opened.outcome, Outcome::Ready);
+    let instance = opened.take_instance().expect("an instance");
+
+    let refresh = view.op::<Ops>(|t| &t.head.refresh).expect("refresh");
+    let refresh_in = TestIn::<RefreshIn>::new()
+        .set(|i| &i.head.op, slot::REFRESH)
+        .settings(b"{}");
+    let refreshed = call_in(refresh, Some(&instance), &refresh_in, zeroed::<OutHead>());
+    assert_eq!(
+        refreshed.outcome,
+        Outcome::Failed,
+        "a refresh of bad settings"
+    );
+    assert_eq!(
+        refreshed.error.as_deref(),
+        Some("settings: missing field `url`")
+    );
+
+    // The instance still serves the settings it held: a delivery is carried to the connector.
+    let deliver = view.op::<Ops>(|t| &t.deliver).expect("deliver");
+    let deliver_in = TestIn::<DeliverIn>::new()
+        .set(|i| &i.head.op, deliver.index())
+        .set(
+            |i| &i.head.ticket,
+            Ticket {
+                slot: 1,
+                generation: 1,
+            },
+        )
+        .blob(|i| &i.batch, batch, BLOB_JSONL);
+    let delivered = call_in(deliver, Some(&instance), &deliver_in, zeroed::<OutHead>());
+    assert_eq!(delivered.outcome, Outcome::Ready);
+    assert_eq!(
+        ESTABLISHES.load(Ordering::SeqCst),
+        1,
+        "the delivery after a refused refresh reached the connector"
+    );
+}
+
+/// The `Span` the sink encodes `record` as, through the request it builds.
+fn span_of(record: &serde_json::Value) -> Option<Span> {
+    let bytes = proto::export_request([record])?;
+    Some(decoded(&bytes).resource_spans[0].scope_spans[0].spans[0].clone())
+}
+
+fn full(extra: serde_json::Value) -> serde_json::Value {
+    let mut span = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "n",
+        "start_ns": 1, "end_ns": 2,
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        span[k] = v.clone();
+    }
+    json!({ "span": span })
+}
+
+/// A full span record's status: absent and `unset` are the empty status (code 0, no message); an
+/// error with no message is code ERROR with an empty message; an error's message is kept.
+#[test]
+fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
+    let status =
+        |extra: serde_json::Value| span_of(&full(extra)).unwrap().status.unwrap_or_default();
+    for unset in [json!({}), json!({"status": {"code": "unset"}})] {
+        let s = status(unset);
+        assert_eq!((s.code, s.message.as_str()), (0, ""), "{s:?}");
+    }
+    let s = status(json!({"status": {"code": "error"}}));
+    assert_eq!((s.code, s.message.as_str()), (2, ""), "{s:?}");
+    let s = status(json!({"status": {"code": "error", "message": "boom"}}));
+    assert_eq!((s.code, s.message.as_str()), (2, "boom"), "{s:?}");
+}
+
+/// Real ids are high-entropy: the 16 hex digits are the exact 8 big-endian bytes (the trace id
+/// after 8 zero bytes), on the projected path and the full span's.
+#[test]
+fn high_entropy_ids_encode_to_their_exact_bytes() {
+    let tail = [0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
+    let mut trace = vec![0u8; 8];
+    trace.extend_from_slice(&tail);
+    let parent = [0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10];
+    let ids = json!({
+        "trace_id": "a1b2c3d4e5f60718", "span_id": "fedcba9876543210",
+        "parent_span_id": "fedcba9876543210",
+    });
+    let mut projected = json!({"name": "n"});
+    for (k, v) in ids.as_object().unwrap() {
+        projected[k] = v.clone();
+    }
+    let spanned = json!({"span": {"name": "n", "trace_id": ids["trace_id"], "span_id": ids["span_id"],
+        "parent_span_id": ids["parent_span_id"]}});
+    for record in [projected, spanned] {
+        let span = span_of(&record).expect("a span");
+        assert_eq!(span.trace_id, trace);
+        assert_eq!(span.span_id, parent);
+        assert_eq!(span.parent_span_id, parent);
+    }
+}
+
+/// Projected-attribute edges: a JSON null is no attribute; an integer past `i64::MAX` is an
+/// `int_value` with the same bits; a `start` near `u64::MAX` saturates instead of overflowing.
+#[test]
+fn projected_attribute_and_time_edges() {
+    let record = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "n",
+        "start": u64::MAX, "duration_us": u64::MAX,
+        "pool": null, "ingress": "i", "op": 18446744073709551615u64,
+    });
+    let span = span_of(&record).expect("a span");
+    assert_eq!(
+        span.attributes,
+        vec![
+            kv("ingress", "i"),
+            KeyValue {
+                key: "op".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::IntValue(-1)),
+                }),
+                ..Default::default()
+            },
+        ]
+    );
+    assert_eq!(span.start_time_unix_nano, u64::MAX);
+    assert_eq!(span.end_time_unix_nano, u64::MAX);
+}
+
+/// The `span` member wins: malformed ids in it are no span even beside valid projected ids; with
+/// both valid, the span member's name is the span's.
+#[test]
+fn the_span_member_wins_over_projected_fields() {
+    let bad = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "projected",
+        "span": {"trace_id": "nothex", "span_id": "0000000000000009", "name": "full"},
+    });
+    assert!(span_of(&bad).is_none());
+    assert!(!proto::is_span(&bad));
+    assert!(proto::export_request([&bad]).is_none());
+    let both = json!({
+        "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "projected",
+        "span": {"trace_id": "0000000000000007", "span_id": "0000000000000009", "name": "full"},
+    });
+    assert_eq!(span_of(&both).unwrap().name, "full");
 }

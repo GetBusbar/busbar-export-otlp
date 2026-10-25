@@ -26,7 +26,7 @@ serde_json = { workspace = true }
 # The operator's endpoint: its userinfo moves into an `Authorization: Basic` header and out of the
 # URL, and is masked in every line this sink writes.
 url = { workspace = true }
-# The OTLP request's protobuf encoding (the fleet's protobuf library; its derive writes the eight
+# The OTLP request's protobuf encoding (the fleet's protobuf library; its derive writes the eleven
 # messages this sink sends), and the userinfo's percent-decoding and Basic base64.
 prost = { workspace = true, features = ["derive"] }
 percent-encoding = { workspace = true }
@@ -41,3 +41,6 @@ tracing = { workspace = true }
 # checked against the proto's publisher, not against this crate's own encoder. Test-only.
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true, features = ["default"] }
+# The contract's test kit (a fake host and a door driven op by op, safe Rust): dev-only, so no shipped
+# image carries it.
+busbar-contract = { workspace = true, features = ["test-seal"] }

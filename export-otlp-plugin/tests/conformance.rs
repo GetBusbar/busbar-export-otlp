@@ -688,6 +688,20 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
             .all(|l| l.starts_with("2 ")),
         "a refusal is an error line: {all}"
     );
+    // Severity wire values: info 0, debug 3. The rollout line is info; every dropped export is debug.
+    for (needle, severity) in [
+        ("OTLP tracing enabled", "0 "),
+        ("returned a non-2xx status", "3 "),
+        ("OTLP span export failed", "3 "),
+    ] {
+        assert!(
+            lines
+                .iter()
+                .filter(|l| l.contains(needle))
+                .all(|l| l.starts_with(severity)),
+            "`{needle}` lines must carry severity {severity:?}: {all}"
+        );
+    }
 
     // RED: the same image over another config answers another transcript.
     let other = transcript(true, PLAINTEXT);
@@ -728,6 +742,95 @@ fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
     let err = load_dropped::<Export>(&cdylib(), &stated, Host::new().bind())
         .expect_err("1.5.5's export ABI is refused");
     assert!(matches!(err, LoadError::ManifestKindAbi { .. }), "{err:?}");
+}
+
+/// `check` at `phase` over instances named `names`, through the slot: the call's outcome and the
+/// findings the sink leased (the JSON text), if it wrote any.
+fn check_through_the_door(
+    p: &Plugin<Export>,
+    phase: u32,
+    names: &[&'static str],
+) -> (String, Option<String>) {
+    let instances: Vec<export::CheckInstance> = names
+        .iter()
+        .map(|n| export::CheckInstance {
+            name: busbar_contract::abi::mechanism::call::AbiStr::of(n),
+            settings: Blob::ABSENT,
+        })
+        .collect();
+    let mut check: CheckIn = blank_in();
+    check.head = in_head();
+    check.phase = phase;
+    check.instances = instances.as_ptr();
+    check.instances_len = instances.len();
+    let check_out = CheckOut {
+        head: out_head(),
+        findings: NO_BLOB,
+    };
+    let mut frame = Frame::new(check, check_out);
+    let called = p.call(export::slot::CHECK, &mut frame);
+    let findings = frame.out.findings;
+    // SAFETY: the sink's findings are a plugin-owned result live under the call's lease, which this
+    // test does not release before it has copied the bytes.
+    let text = (!findings.ptr.is_null())
+        .then(|| String::from_utf8(unsafe { findings.bytes() }.to_vec()).expect("UTF-8 findings"));
+    (spelled(&called), text)
+}
+
+/// THE LIMITS-PHASE CHECK, DRIVEN THROUGH THE DOOR: with two instances at the limits phase the sink
+/// leases `check_limits`' one refusal (naming the second and the first); at the instances phase it
+/// has nothing to say whatever the instances. Both doors.
+#[test]
+fn the_limits_check_refuses_a_second_instance_through_the_door() {
+    let expected = serde_json::to_string(&busbar_export_otlp::check_limits(&[
+        "first".to_string(),
+        "second".to_string(),
+    ]))
+    .unwrap();
+    assert!(
+        expected.contains("export.second") && expected.contains("'first'"),
+        "{expected}"
+    );
+    for dropped in [false, true] {
+        let host = Host::new();
+        let p = load(&host, dropped);
+        assert_eq!(open(&p, COLLECTOR), "Ready ");
+        let (outcome, findings) =
+            check_through_the_door(&p, export::CHECK_PHASE_LIMITS, &["first", "second"]);
+        assert_eq!(outcome, "Ready ", "dropped={dropped}");
+        assert_eq!(
+            findings.as_deref(),
+            Some(expected.as_str()),
+            "dropped={dropped}"
+        );
+        let (outcome, findings) =
+            check_through_the_door(&p, export::CHECK_PHASE_INSTANCES, &["first", "second"]);
+        assert_eq!(outcome, "Ready ", "dropped={dropped}");
+        assert_eq!(findings, None, "no finding at the instances phase");
+        let (_, findings) = check_through_the_door(&p, export::CHECK_PHASE_LIMITS, &["first"]);
+        assert_eq!(findings, None, "one instance is no finding");
+        close(&p);
+    }
+}
+
+/// THE NEED IS PINNED TO THE `url` SETTING, read from the Statement the door states: the target
+/// is the setting's name (its bytes, not just its length) and the rest of the declaration is the
+/// collector's.
+#[test]
+fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
+    use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, KEEP_NAMED};
+    let st = busbar_export_otlp::door::STATEMENT;
+    assert_eq!(st.needs_len, 1);
+    // SAFETY: the Statement's needs are a `'static` list of `needs_len` entries.
+    let need = unsafe { std::slice::from_raw_parts(st.needs, st.needs_len) }[0];
+    // SAFETY: the Statement's strings are `'static`.
+    let (target, transport) = unsafe { (need.target_from.bytes(), need.transport.bytes()) };
+    assert_eq!(target, b"settings.url");
+    assert_eq!(transport, b"http");
+    assert_eq!(need.direction, DIRECTION_OUTBOUND);
+    assert_eq!(need.egress_class, EGRESS_LOOPBACK_ALLOWED);
+    assert_eq!(need.timeout_ms, busbar_export_otlp::EXPORT_TIMEOUT_MS);
+    assert_eq!(need.keep_mode, KEEP_NAMED);
 }
 
 // ── THE PUBLISHED CONFORMANCE SUITE ─────────────────────────────────────────────────────────────
