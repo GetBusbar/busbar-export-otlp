@@ -424,6 +424,32 @@ fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
     }
 }
 
+/// A password with an unescaped `/`, `?` or `#` makes the url unparsable (the text before it reads as
+/// a port) and ends a first-delimiter "authority" inside the password: the userinfo cut must still
+/// remove the whole password from the log form, the dial target and the settings Debug.
+#[test]
+fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
+    for (url, secret) in [
+        ("https://user:ab/cd==@collector.example/v1/traces", "ab/cd"),
+        ("https://user:ab#cd==@collector.example/v1/traces", "ab#cd"),
+        ("https://user:ab?cd==@collector.example/v1/traces", "ab?cd"),
+    ] {
+        assert!(url::Url::parse(url).is_err(), "{url} must be unparsable");
+        let masked = mask_userinfo(url);
+        assert!(!masked.contains(secret), "mask_userinfo leaked: {masked}");
+        let (clean, auth) = split_credentials(url);
+        assert!(!clean.contains(secret), "split_credentials leaked: {clean}");
+        assert_eq!(auth, None);
+        let debug = format!(
+            "{:?}",
+            config::OtlpSettings {
+                url: url.to_string()
+            }
+        );
+        assert!(!debug.contains(secret), "Debug leaked: {debug}");
+    }
+}
+
 /// THE ONE-INSTANCE REFUSAL, byte for byte the line busbar 1.5.5's `--validate` printed for a second
 /// `module: otlp` instance (busbar `tests/v1.5.5-validate/refusals.txt`): one line per instance after
 /// the first, naming the first; one instance, or none, is no finding.
