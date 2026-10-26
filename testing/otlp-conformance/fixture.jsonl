@@ -1,0 +1,9 @@
+{"trace_id":"00000000000000a1","span_id":"00000000000000b1","name":"chat.request","start":1700000000000000,"duration_us":2500,"pool":"main","ingress":"openai","op":"chat","lane":"fast","provider":"anthropic","model":"claude-x"}
+{"trace_id":"00000000000000a1","span_id":"00000000000000b2","parent_span_id":"00000000000000b1","name":"provider.call","start":1700000000000100,"duration_us":2000,"pool":"main","provider":"anthropic"}
+{"trace_id":"00000000000000a2","span_id":"00000000000000b3","name":"typed.attributes","start":1700000001000000,"duration_us":1,"pool":"p","op":"x","lane":7,"model":true}
+{"trace_id":"00000000000000A3","span_id":"00000000000000B4","name":"upper.hex.ids","start":1700000002000000,"duration_us":0}
+this line is not json
+{"trace_id":"00000000000000a4","span_id":"0000000000000000","name":"zero.span.id.is.no.span","start":1,"duration_us":1}
+{"name":"no.ids.is.no.span","start":1,"duration_us":1}
+{"trace_id":"00000000000000a5","span_id":"00000000000000b5","span":{"trace_id":"00000000000000a5","span_id":"00000000000000b5","parent_span_id":"00000000000000b4","name":"full.span","start_ns":1700000003000000123,"end_ns":1700000003000004567,"attributes":[{"key":"s","value":"text"},{"key":"i","value":-42},{"key":"b","value":false},{"key":"d","value":0.5},{"key":"arr","value":["a",1,true]},{"key":"obj","value":{"k":"v"}}],"events":[{"time_ns":1700000003000001000,"name":"first","attributes":[{"key":"e","value":"1"}]},{"time_ns":1700000003000002000,"name":"second","attributes":[]}],"status":{"code":"error","message":"upstream 503"}}}
+{"trace_id":"00000000000000a5","span_id":"00000000000000b6","span":{"trace_id":"00000000000000a5","span_id":"00000000000000b6","name":"full.span.ok","start_ns":1700000003000000500,"end_ns":1700000003000000900,"attributes":[],"events":[],"status":{"code":"ok"}}}
