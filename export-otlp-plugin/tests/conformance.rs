@@ -882,7 +882,7 @@ fn suite_host(
     conformance_host::host(wake, anchors)
 }
 
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_export_otlp::door::door,
     cdylib: "busbar_export_otlp_plugin",
     inputs: include_str!("conformance.json"),
@@ -897,11 +897,11 @@ busbar_plugin_loader::conformance_suite! {
 mod declared_secrets {
     use std::sync::Arc;
 
-    use busbar_plugin_loader::conformance::settings_as_the_kernel_resolves;
     use busbar_plugin_loader::dispatch::kinds::export::Export;
     use busbar_plugin_loader::dispatch::{
         load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, LinkedRow, NoSink, Plugin,
     };
+    use busbar_test_kit::conformance::settings_as_the_kernel_resolves;
     use serde_json::{json, Value};
 
     fn load() -> Plugin<Export> {
