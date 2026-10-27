@@ -27,7 +27,7 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{Blob, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::cred::PasswordAt;
@@ -84,8 +84,16 @@ const TAIL: Tail = Tail {
     routes_len: 0,
 };
 
+/// The settings fields that may carry a credential, declared so the kernel resolves a
+/// `{env:}`/`{file:}`/`{module:}` reference written there (OWNER RULING, CHIP-REVIEW-v4 change 2).
+/// `url`: its userinfo becomes the `Authorization: Basic` header. The export host lends nothing;
+/// the sink receives the resolved string.
+const SECRET_REFS: &[AbiStr] = &[abi_str("url")];
+
 /// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
 pub const STATEMENT: Statement = Statement {
+    secret_refs: SECRET_REFS.as_ptr(),
+    secret_refs_len: SECRET_REFS.len(),
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
