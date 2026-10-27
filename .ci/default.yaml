@@ -244,6 +244,8 @@ on:
     - checks: [conformance]
       blocks: false
   landed: [conformance]
+  # On request at dev's tip (`modernci call run_event`): the verdict for dev's own head.
+  manual: [conformance]
 checks:
   pin:
     # ci / the busbar pin is one commit
