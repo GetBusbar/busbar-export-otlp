@@ -79,7 +79,7 @@ struct InstrumentationScope {
 
 /// `Span` (trace/v1): the fields this sink fills.
 #[derive(Clone, PartialEq, prost::Message)]
-struct Span {
+pub(crate) struct Span {
     #[prost(bytes = "vec", tag = "1")]
     trace_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
@@ -275,7 +275,12 @@ fn full_span(full: &Value) -> Option<Span> {
 /// The encoded `ExportTraceServiceRequest` carrying each of `records` that is a span, in order, or
 /// `None` when none of them carries a usable span identity.
 pub fn export_request<'a>(records: impl IntoIterator<Item = &'a Value>) -> Option<Vec<u8>> {
-    let spans: Vec<Span> = records.into_iter().filter_map(span).collect();
+    encode(records.into_iter().filter_map(span).collect())
+}
+
+/// The encoded `ExportTraceServiceRequest` carrying `spans` (each built once by [`span`]), or `None`
+/// when there are none.
+pub(crate) fn encode(spans: Vec<Span>) -> Option<Vec<u8>> {
     if spans.is_empty() {
         return None;
     }
@@ -302,7 +307,7 @@ pub fn is_span(record: &Value) -> bool {
 
 /// The record's `Span` message: from its full span record where the host handed one (its `span`
 /// member, [`full_span`]), else from its projected fields.
-fn span(record: &Value) -> Option<Span> {
+pub(crate) fn span(record: &Value) -> Option<Span> {
     if let Some(full) = record.get(SPAN_MEMBER).filter(|v| v.is_object()) {
         return full_span(full);
     }
