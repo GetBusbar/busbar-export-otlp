@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The `settings:` of an `export.<name>.module: otlp` instance — the home of the retired
-//! `observability.otlp_url` since 1.5.3, and the sink's own shape now that the sink is this plugin.
-//! The same serde the host's configuration grammar uses, so a settings error reads exactly as it
-//! always has (`export.<name>.settings: unknown field …` / `missing field `url``).
+//! The `settings:` of an `export.<name>.module: otlp` instance. The same serde the host's
+//! configuration grammar uses, so a settings error reads the same
+//! (`export.<name>.settings: unknown field …` / `missing field `url``).
 
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +27,7 @@ impl std::fmt::Debug for OtlpSettings {
 
 impl OtlpSettings {
     /// The settings `bytes` hold, refused in the configuration grammar's words (`unknown field …`,
-    /// `missing field `url``), as 1.5.x read them from the configuration's own value.
+    /// `missing field `url``).
     ///
     /// Empty settings read as `{}` (the SDK's `settings_object` rule), so they are refused for the
     /// missing `url`, not as JSON that ended early.

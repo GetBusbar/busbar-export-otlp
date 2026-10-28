@@ -44,7 +44,7 @@ use crate::{
 pub const NEED: u32 = 0;
 
 /// The collector, reached through the host: framed `http`, under the `loopback-allowed` egress class
-/// 1.5.5's exporter held its endpoint to, its target the `url` setting (THE DESIGN §5, PB-100): the
+/// the exporter holds its endpoint to, its target the `url` setting: the
 /// host declares the need pinned to the operator's collector, its userinfo left out, and refuses a
 /// dial to any other host. Each export names the same collector ([`Endpoint::collector`], the URL
 /// with its userinfo stripped), so no credential is ever part of what the host dials; the userinfo
@@ -82,7 +82,7 @@ const TAIL: Tail = Tail {
 };
 
 /// The settings fields that may carry a credential, declared so the kernel resolves a
-/// `{env:}`/`{file:}`/`{module:}` reference written there (OWNER RULING, CHIP-REVIEW-v4 change 2).
+/// `{env:}`/`{file:}`/`{module:}` reference written there.
 /// `url`: its userinfo becomes the `Authorization: Basic` header. The export host lends nothing;
 /// the sink receives the resolved string.
 const SECRET_REFS: &[AbiStr] = &[abi_str("url")];
@@ -95,7 +95,7 @@ pub const STATEMENT: Statement = Statement {
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
-    // refusal of a second `module: otlp` sink in 1.5.5's text (`crate::check_limits`).
+    // refusal of a second `module: otlp` sink (`crate::check_limits`).
     marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
@@ -426,7 +426,7 @@ impl SafeSlot for Status {
     }
 }
 
-/// `check`: at the limits phase, 1.5.5's refusal of every instance after the first
+/// `check`: at the limits phase, a refusal of every instance after the first
 /// ([`crate::check_limits`]) — the sink states the `one_instance` mark, so the host asks it while
 /// the configuration is resolved; READY with nothing otherwise.
 pub struct Check;
