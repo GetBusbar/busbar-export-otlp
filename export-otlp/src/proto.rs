@@ -219,11 +219,10 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
         .collect()
 }
 
-/// THE FULL SPAN RECORD as its `Span` (busbar status row 173): its ids and name, its start and end
+/// The full span record as its `Span`: its ids and name, its start and end
 /// in nanoseconds, its attributes in the order and types the host states them (an array an
 /// `array_value`), its events (each its time, name and attributes), and its status (an error with
-/// its message; unset the empty status). Everything the previous release's exporter sent for a
-/// span, whatever `fields:` selected.
+/// its message; unset the empty status), whatever `fields:` selected.
 fn full_span(full: &Value) -> Option<Span> {
     let trace_id = id(full.get("trace_id")?)?;
     let span_id = id(full.get("span_id")?)?;
