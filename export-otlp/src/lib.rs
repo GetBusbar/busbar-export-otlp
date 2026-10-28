@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **`busbar-export-otlp`** — the OTLP trace sink as a `kind: export` plugin (owner ruling Q75,
-//! 2026-09-25: OTLP export never delivered in 1.5.5, and 1.6.0 fixes it): `export.<name>.module:
-//! otlp`.
+//! **`busbar-export-otlp`** — the OTLP trace sink as a `kind: export` plugin:
+//! `export.<name>.module: otlp`.
 //!
 //! **What it carries.** The `traces` stream: one record per closed span, built by the host's traces
-//! producer (K9a S7) — the span's `trace_id`, `span_id`, `parent_span_id`, `name`, `start`,
+//! producer — the span's `trace_id`, `span_id`, `parent_span_id`, `name`, `start`,
 //! `duration_us` and whichever of `pool` / `ingress` / `op` / `lane` / `provider` / `model` it
 //! carries. Each batch the host hands it becomes one OTLP/HTTP protobuf `ExportTraceServiceRequest`
 //! ([`proto`]): one resource (`service.name = busbar`), one scope (`busbar`), one span per record.
@@ -39,9 +38,8 @@ pub mod proto;
 
 pub use config::OtlpSettings;
 
-/// THE LIMITS CHECK across every configured instance of this sink, in configuration order: the sink
-/// states the `one_instance` mark, so a second instance is refused in busbar 1.5.5's words, once per
-/// extra instance, naming the first.
+/// The limits check across every configured instance, in configuration order: the sink states the
+/// `one_instance` mark, so each extra instance is refused, naming the first.
 pub fn check_limits(instances: &[String]) -> Vec<String> {
     let Some((first, rest)) = instances.split_first() else {
         return Vec::new();
@@ -66,7 +64,7 @@ pub const DECLARES: &str = include_str!("../declares.json");
 
 /// OTLP/HTTP's binary protobuf encoding.
 pub const CONTENT_TYPE: &str = "application/x-protobuf";
-/// Each export's end-to-end deadline: the ten seconds 1.5.x's exporter held its HTTP client to.
+/// Each export's end-to-end deadline.
 pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
 /// The HTTP Basic auth scheme prefix (RFC 7617), with its trailing space.
 const BASIC: &str = "Basic ";
@@ -94,7 +92,7 @@ pub fn mask_userinfo(url: &str) -> String {
 /// The OTLP/HTTP traces path (the specification's default), kept in a log line: it is not a secret.
 const OTLP_TRACES_PATH: &str = "/v1/traces";
 
-/// `url` as a log line or `Debug` names it (CREDENTIAL-LOCKDOWN H3): scheme, a masked userinfo, host
+/// `url` as a log line or `Debug` names it: scheme, a masked userinfo, host
 /// and port. A path becomes `/***` unless it is `/` or OTLP's own `/v1/traces`, since a collector key
 /// may ride in the path. A query becomes `?***` (`?api-key=`). A fragment is dropped. A string that
 /// is not a URL keeps only its scheme and authority, userinfo cut.
@@ -175,7 +173,7 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
     out
 }
 
-/// THE AMBIGUOUS-URL REFUSAL (owner ruling 2026-10-24): `Some(the refusal)` when `url` parses but
+/// The ambiguous-URL refusal: `Some(the refusal)` when `url` parses but
 /// carries an `@` after its host — `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
@@ -200,7 +198,7 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 /// carries none or is not a URL. What the request carries never holds the secret in its target.
 pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     let Ok(mut parsed) = url::Url::parse(endpoint) else {
-        // Not a URL the client can parse (1.5.5 accepted any string as the url): no credential is
+        // Not a URL the client can parse (any string is accepted as the url): no credential is
         // made of it, and its userinfo never reaches the host's dial target.
         return (cut_userinfo(endpoint, ""), None);
     };
