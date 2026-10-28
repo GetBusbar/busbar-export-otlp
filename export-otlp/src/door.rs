@@ -100,6 +100,10 @@ pub const STATEMENT: Statement = Statement {
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
 
+const METHOD: &[u8] = b"POST";
+const CONTENT_TYPE_FIELD: &[u8] = b"content-type";
+const AUTHORIZATION_FIELD: &[u8] = b"authorization";
+
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
 /// the collector is named as every line names it, the request target and the `Authorization` the
 /// url's userinfo became are redacted.
@@ -150,12 +154,16 @@ impl Endpoint {
     #[must_use]
     pub fn request(&self, body: Vec<u8>) -> Option<Request> {
         let (target, authorization) = self.target.as_ref()?;
-        let mut fields = vec![(b"content-type".to_vec(), CONTENT_TYPE.as_bytes().to_vec())];
+        let mut fields = Vec::with_capacity(2);
+        fields.push((
+            CONTENT_TYPE_FIELD.to_vec(),
+            CONTENT_TYPE.as_bytes().to_vec(),
+        ));
         if let Some(value) = authorization {
-            fields.push((b"authorization".to_vec(), value.as_bytes().to_vec()));
+            fields.push((AUTHORIZATION_FIELD.to_vec(), value.as_bytes().to_vec()));
         }
         Some(Request {
-            method: b"POST".to_vec(),
+            method: METHOD.to_vec(),
             target: target.as_bytes().to_vec(),
             fields,
             body,
@@ -298,18 +306,20 @@ impl Life for Otlp {
 
 /// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped.
 fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
-    let mut records: Vec<serde_json::Value> = Vec::new();
+    let mut spans = Vec::new();
     for line in batch
         .split(|b| *b == b'\n')
         .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
     {
         match serde_json::from_slice::<serde_json::Value>(line) {
-            Ok(record) if proto::is_span(&record) => records.push(record),
-            Ok(_) => tracing::debug!("OTLP span export skipped a record with no span identity"),
+            Ok(record) => match proto::span(&record) {
+                Some(span) => spans.push(span),
+                None => tracing::debug!("OTLP span export skipped a record with no span identity"),
+            },
             Err(_) => tracing::debug!("OTLP span export skipped a line that is not JSON"),
         }
     }
-    proto::export_request(&records)
+    proto::encode(spans)
 }
 
 /// `deliver`: the batch as one OTLP request, exchanged over the need.
