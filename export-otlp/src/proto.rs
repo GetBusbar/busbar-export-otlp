@@ -79,7 +79,7 @@ struct InstrumentationScope {
 
 /// `Span` (trace/v1): the fields this sink fills.
 #[derive(Clone, PartialEq, prost::Message)]
-struct Span {
+pub(crate) struct Span {
     #[prost(bytes = "vec", tag = "1")]
     trace_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
@@ -219,11 +219,10 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
         .collect()
 }
 
-/// THE FULL SPAN RECORD as its `Span` (busbar status row 173): its ids and name, its start and end
+/// The full span record as its `Span`: its ids and name, its start and end
 /// in nanoseconds, its attributes in the order and types the host states them (an array an
 /// `array_value`), its events (each its time, name and attributes), and its status (an error with
-/// its message; unset the empty status). Everything the previous release's exporter sent for a
-/// span, whatever `fields:` selected.
+/// its message; unset the empty status), whatever `fields:` selected.
 fn full_span(full: &Value) -> Option<Span> {
     let trace_id = id(full.get("trace_id")?)?;
     let span_id = id(full.get("span_id")?)?;
@@ -275,7 +274,12 @@ fn full_span(full: &Value) -> Option<Span> {
 /// The encoded `ExportTraceServiceRequest` carrying each of `records` that is a span, in order, or
 /// `None` when none of them carries a usable span identity.
 pub fn export_request<'a>(records: impl IntoIterator<Item = &'a Value>) -> Option<Vec<u8>> {
-    let spans: Vec<Span> = records.into_iter().filter_map(span).collect();
+    encode(records.into_iter().filter_map(span).collect())
+}
+
+/// The encoded `ExportTraceServiceRequest` carrying `spans` (each built once by [`span`]), or `None`
+/// when there are none.
+pub(crate) fn encode(spans: Vec<Span>) -> Option<Vec<u8>> {
     if spans.is_empty() {
         return None;
     }
@@ -302,7 +306,7 @@ pub fn is_span(record: &Value) -> bool {
 
 /// The record's `Span` message: from its full span record where the host handed one (its `span`
 /// member, [`full_span`]), else from its projected fields.
-fn span(record: &Value) -> Option<Span> {
+pub(crate) fn span(record: &Value) -> Option<Span> {
     if let Some(full) = record.get(SPAN_MEMBER).filter(|v| v.is_object()) {
         return full_span(full);
     }

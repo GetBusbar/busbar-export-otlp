@@ -44,7 +44,7 @@ use crate::{
 pub const NEED: u32 = 0;
 
 /// The collector, reached through the host: framed `http`, under the `loopback-allowed` egress class
-/// 1.5.5's exporter held its endpoint to, its target the `url` setting (THE DESIGN §5, PB-100): the
+/// the exporter holds its endpoint to, its target the `url` setting: the
 /// host declares the need pinned to the operator's collector, its userinfo left out, and refuses a
 /// dial to any other host. Each export names the same collector ([`Endpoint::collector`], the URL
 /// with its userinfo stripped), so no credential is ever part of what the host dials; the userinfo
@@ -82,7 +82,7 @@ const TAIL: Tail = Tail {
 };
 
 /// The settings fields that may carry a credential, declared so the kernel resolves a
-/// `{env:}`/`{file:}`/`{module:}` reference written there (OWNER RULING, CHIP-REVIEW-v4 change 2).
+/// `{env:}`/`{file:}`/`{module:}` reference written there.
 /// `url`: its userinfo becomes the `Authorization: Basic` header. The export host lends nothing;
 /// the sink receives the resolved string.
 const SECRET_REFS: &[AbiStr] = &[abi_str("url")];
@@ -95,10 +95,14 @@ pub const STATEMENT: Statement = Statement {
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
-    // refusal of a second `module: otlp` sink in 1.5.5's text (`crate::check_limits`).
+    // refusal of a second `module: otlp` sink (`crate::check_limits`).
     marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
+
+const METHOD: &[u8] = b"POST";
+const CONTENT_TYPE_FIELD: &[u8] = b"content-type";
+const AUTHORIZATION_FIELD: &[u8] = b"authorization";
 
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
 /// the collector is named as every line names it, the request target and the `Authorization` the
@@ -150,12 +154,16 @@ impl Endpoint {
     #[must_use]
     pub fn request(&self, body: Vec<u8>) -> Option<Request> {
         let (target, authorization) = self.target.as_ref()?;
-        let mut fields = vec![(b"content-type".to_vec(), CONTENT_TYPE.as_bytes().to_vec())];
+        let mut fields = Vec::with_capacity(2);
+        fields.push((
+            CONTENT_TYPE_FIELD.to_vec(),
+            CONTENT_TYPE.as_bytes().to_vec(),
+        ));
         if let Some(value) = authorization {
-            fields.push((b"authorization".to_vec(), value.as_bytes().to_vec()));
+            fields.push((AUTHORIZATION_FIELD.to_vec(), value.as_bytes().to_vec()));
         }
         Some(Request {
-            method: b"POST".to_vec(),
+            method: METHOD.to_vec(),
             target: target.as_bytes().to_vec(),
             fields,
             body,
@@ -298,18 +306,20 @@ impl Life for Otlp {
 
 /// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped.
 fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
-    let mut records: Vec<serde_json::Value> = Vec::new();
+    let mut spans = Vec::new();
     for line in batch
         .split(|b| *b == b'\n')
         .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
     {
         match serde_json::from_slice::<serde_json::Value>(line) {
-            Ok(record) if proto::is_span(&record) => records.push(record),
-            Ok(_) => tracing::debug!("OTLP span export skipped a record with no span identity"),
+            Ok(record) => match proto::span(&record) {
+                Some(span) => spans.push(span),
+                None => tracing::debug!("OTLP span export skipped a record with no span identity"),
+            },
             Err(_) => tracing::debug!("OTLP span export skipped a line that is not JSON"),
         }
     }
-    proto::export_request(&records)
+    proto::encode(spans)
 }
 
 /// `deliver`: the batch as one OTLP request, exchanged over the need.
@@ -416,7 +426,7 @@ impl SafeSlot for Status {
     }
 }
 
-/// `check`: at the limits phase, 1.5.5's refusal of every instance after the first
+/// `check`: at the limits phase, a refusal of every instance after the first
 /// ([`crate::check_limits`]) — the sink states the `one_instance` mark, so the host asks it while
 /// the configuration is resolved; READY with nothing otherwise.
 pub struct Check;

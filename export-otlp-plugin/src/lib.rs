@@ -4,7 +4,7 @@
 //! The **OTLP trace export sink as a droppable busbar plugin** — the `cdylib` a signed tarball of
 //! the sink carries (`kind: export`, alias `otlp`): the logic crate re-exported whole, and its door
 //! (`busbar_export_otlp::door::door`) exported as this image's ONE symbol, `busbar_plugin_door`
-//! (`export_door!`, THE DESIGN §11.4). The logic crate is `#![forbid(unsafe_code)]` and exports
+//! (`export_door!`). The logic crate is `#![forbid(unsafe_code)]` and exports
 //! nothing, so a build that links it carries no door symbol. Pack it with `busbar-plugin-pack
 //! --kind export --alias otlp --declares-file export-otlp/declares.json`.
 //!
