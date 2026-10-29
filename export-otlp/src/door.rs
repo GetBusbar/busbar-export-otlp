@@ -26,7 +26,7 @@ use busbar_contract::abi::export::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -73,16 +73,19 @@ const STREAMS: &[u8] = &[ExportStream::Traces as u8];
 
 const TAIL: Tail = tail(STREAMS, &[]);
 
-/// The settings fields that may carry a credential, declared so the kernel resolves a
-/// `{env:}`/`{file:}`/`{module:}` reference written there.
-/// `url`: its userinfo becomes the `Authorization: Basic` header. The export host lends nothing;
-/// the sink receives the resolved string.
-const SECRET_REFS: &[AbiStr] = &[abi_str("url")];
+/// THE REFERENCE-CAPABLE, NOT-SECRET SETTINGS FIELDS (busbar lead ruling item 7a), stated in the
+/// Statement's extensions under the contract's `EXT_REFERENCE_FIELDS` key: a `{env:}`/`{file:}`/
+/// `{module:}` reference written at `url` is resolved by the kernel IN PLACE to its string (a 1.5.5
+/// config's `url: {env: VAR}` keeps booting), and a literal url passes as written (never refused
+/// as a secret literal). The value is not a secret: it is never lent. The export host lends nothing; the sink
+/// receives the resolved string.
+busbar_contract::statement_extensions!(EXTENSIONS: [
+    (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
+]);
 
 /// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
 pub const STATEMENT: Statement = Statement {
-    secret_refs: SECRET_REFS.as_ptr(),
-    secret_refs_len: SECRET_REFS.len(),
+    extensions: EXTENSIONS,
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
