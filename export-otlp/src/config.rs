@@ -3,7 +3,9 @@
 
 //! The `settings:` of an `export.<name>.module: otlp` instance. The same serde the host's
 //! configuration grammar uses, so a settings error reads the same
-//! (`export.<name>.settings: unknown field …` / `missing field `url``).
+//! (`export.<name>.settings: unknown field …` / `missing field `url``). The door reads them through
+//! `busbar_contract::abi::sdk::life::settings_as` (empty settings are `{}`, so they are refused for
+//! the missing `url`, not as JSON that ended early).
 
 use serde::{Deserialize, Serialize};
 
@@ -22,20 +24,5 @@ impl std::fmt::Debug for OtlpSettings {
         f.debug_struct("OtlpSettings")
             .field("url", &crate::log_target(&self.url))
             .finish()
-    }
-}
-
-impl OtlpSettings {
-    /// The settings `bytes` hold, refused in the configuration grammar's words (`unknown field …`,
-    /// `missing field `url``).
-    ///
-    /// Empty settings read as `{}` (the SDK's `settings_object` rule), so they are refused for the
-    /// missing `url`, not as JSON that ended early.
-    ///
-    /// # Errors
-    /// The bytes are not JSON, or not this shape.
-    pub fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        let bytes = if bytes.is_empty() { b"{}" } else { bytes };
-        serde_json::from_value(serde_json::from_slice(bytes)?)
     }
 }

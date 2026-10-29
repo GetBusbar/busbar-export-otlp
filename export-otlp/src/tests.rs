@@ -7,7 +7,8 @@
 
 use super::*;
 use busbar_contract::abi::sdk::exchange::Request;
-use busbar_contract::abi::sdk::life::Life;
+use busbar_contract::abi::sdk::export::second_instances;
+use busbar_contract::abi::sdk::life::{settings_as, Life};
 use door::{Endpoint, Otlp};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
@@ -291,7 +292,7 @@ fn settings_refuse_in_the_grammars_words() {
 #[test]
 fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
     let endpoint = Endpoint::of(
-        &OtlpSettings::parse(
+        &settings_as::<OtlpSettings>(
             br#"{"url":"https://us%40r:p%3Ass@collector.example:4318/v1/traces"}"#,
         )
         .expect("parses"),
@@ -360,16 +361,16 @@ fn the_small_encoders_match_their_standards() {
         ("http://localhost:4318/v1/traces".into(), None)
     );
     assert_eq!(
-        mask_userinfo("https://u:p@collector.example/v1"),
+        mask_url("https://u:p@collector.example/v1"),
         "https://***@collector.example/v1"
     );
-    assert_eq!(mask_userinfo("not a url"), "not a url");
+    assert_eq!(mask_url("not a url"), "not a url");
     assert_eq!(
-        mask_userinfo("https://tok@collector.example/v1"),
+        mask_url("https://tok@collector.example/v1"),
         "https://***@collector.example/v1"
     );
     assert_eq!(
-        mask_userinfo("https://:p@collector.example/v1"),
+        mask_url("https://:p@collector.example/v1"),
         "https://***@collector.example/v1"
     );
 }
@@ -436,8 +437,8 @@ fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
         ("https://user:ab?cd==@collector.example/v1/traces", "ab?cd"),
     ] {
         assert!(url::Url::parse(url).is_err(), "{url} must be unparsable");
-        let masked = mask_userinfo(url);
-        assert!(!masked.contains(secret), "mask_userinfo leaked: {masked}");
+        let masked = mask_url(url);
+        assert!(!masked.contains(secret), "mask_url leaked: {masked}");
         let (clean, auth) = split_credentials(url);
         assert!(!clean.contains(secret), "split_credentials leaked: {clean}");
         assert_eq!(auth, None);
@@ -456,6 +457,7 @@ fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
 /// the first, naming the first; one instance, or none, is no finding.
 #[test]
 fn a_second_instance_is_refused_in_1_5_5_words() {
+    let check_limits = |names: &[String]| second_instances(names, ALIAS, ONE_INSTANCE);
     assert!(check_limits(&[]).is_empty());
     assert!(check_limits(&["traces".to_string()]).is_empty());
     assert_eq!(
@@ -500,7 +502,7 @@ fn the_need_is_pinned_to_the_url_setting() {
 #[test]
 fn no_collector_credential_renders_through_debug() {
     let raw = br#"{"url":"https://ops:hunter2@collector.example/v1/traces"}"#;
-    let settings = crate::config::OtlpSettings::parse(raw).expect("parses");
+    let settings = settings_as::<OtlpSettings>(raw).expect("parses");
     let endpoint = crate::door::Endpoint::of(&settings);
     assert!(
         endpoint.target.as_ref().is_some_and(|(_, a)| a.is_some()),
@@ -546,14 +548,14 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
     let url = "https://ops:hunter2@collector.example:99999/v1/traces";
     assert!(url::Url::parse(url).is_err(), "the fixture does not parse");
     assert_eq!(
-        crate::mask_userinfo(url),
+        mask_url(url),
         "https://***@collector.example:99999/v1/traces"
     );
     let (collector, auth) = crate::split_credentials(url);
     assert!(!collector.contains("hunter2"), "{collector}");
     assert_eq!(auth, None);
     let raw = format!(r#"{{"url":"{url}"}}"#);
-    let settings = crate::config::OtlpSettings::parse(raw.as_bytes()).expect("parses");
+    let settings = settings_as::<OtlpSettings>(raw.as_bytes()).expect("parses");
     let endpoint = crate::door::Endpoint::of(&settings);
     for text in [format!("{endpoint:?}"), format!("{settings:?}")] {
         assert!(!text.contains("hunter2"), "{text}");
