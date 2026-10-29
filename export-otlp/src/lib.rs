@@ -36,24 +36,15 @@ pub mod config;
 pub mod door;
 pub mod proto;
 
+use busbar_contract::abi::sdk::mask::mask_url;
 pub use config::OtlpSettings;
 
-/// The limits check across every configured instance, in configuration order: the sink states the
-/// `one_instance` mark, so each extra instance is refused, naming the first.
-pub fn check_limits(instances: &[String]) -> Vec<String> {
-    let Some((first, rest)) = instances.split_first() else {
-        return Vec::new();
-    };
-    rest.iter()
-        .map(|name| {
-            format!(
-                "export.{name}: a second `module: {ALIAS}` instance (already defined as '{first}'). \
-                 OTLP installs the ONE process-global tracer subscriber, so a second instance could \
-                 only be silently ignored — keep a single instance."
-            )
-        })
-        .collect()
-}
+/// Why a second instance is refused, the tail of the limits check's line
+/// (`busbar_contract::abi::sdk::export::second_instances`): the sink states the `one_instance`
+/// mark, so each extra instance is refused, naming the first.
+pub const ONE_INSTANCE: &str =
+    "OTLP installs the ONE process-global tracer subscriber, so a second \
+     instance could only be silently ignored — keep a single instance.";
 
 /// The plugin's canonical name.
 pub const NAME: &str = "busbar-export-otlp";
@@ -68,26 +59,6 @@ pub const CONTENT_TYPE: &str = "application/x-protobuf";
 pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
 /// The HTTP Basic auth scheme prefix (RFC 7617), with its trailing space.
 const BASIC: &str = "Basic ";
-
-/// `url` with any userinfo (`scheme://user:pass@host/…`) replaced by `***`, safe for a log line;
-/// a URL with none unchanged. A string that is not a URL but carries `scheme://userinfo@…` has its
-/// userinfo cut the same way (`cut_userinfo`); one without is unchanged.
-pub fn mask_userinfo(url: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(url) else {
-        return cut_userinfo(url, "***@");
-    };
-    if parsed.username().is_empty() && parsed.password().is_none() {
-        return url.to_string();
-    }
-    if parsed.set_password(None).is_err() || parsed.set_username("***").is_err() {
-        let host = parsed.host_str().unwrap_or("");
-        return match parsed.port() {
-            Some(p) => format!("{}://***@{host}:{p}", parsed.scheme()),
-            None => format!("{}://***@{host}", parsed.scheme()),
-        };
-    }
-    parsed.into()
-}
 
 /// The OTLP/HTTP traces path (the specification's default), kept in a log line: it is not a secret.
 const OTLP_TRACES_PATH: &str = "/v1/traces";
@@ -129,14 +100,10 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// The parts of `url` that can carry a credential, as [`scrub`] cuts them from foreign text: the URL
-/// as written and userinfo-masked, the URL without userinfo, its path (unless OTLP's own), query and
-/// userinfo, each also percent-decoded; longest first.
+/// as written and masked (`busbar_contract::abi::sdk::mask::mask_url`), the URL without userinfo,
+/// its path (unless OTLP's own), query and userinfo, each also percent-decoded; longest first.
 pub fn secret_parts(url: &str) -> Vec<String> {
-    let mut parts = vec![
-        url.to_string(),
-        mask_userinfo(url),
-        split_credentials(url).0,
-    ];
+    let mut parts = vec![url.to_string(), mask_url(url), split_credentials(url).0];
     if let Ok(u) = url::Url::parse(url) {
         if !matches!(u.path(), "" | "/" | OTLP_TRACES_PATH) {
             parts.push(u.path().to_string());
