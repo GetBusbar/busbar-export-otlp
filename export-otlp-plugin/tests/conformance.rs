@@ -199,7 +199,7 @@ impl Conns for Collector {
                 .map(|(n, v)| [(*n).to_owned(), String::from_utf8_lossy(v).into_owned()])
                 .collect::<Vec<_>>(),
             "timeout_ms": desc.timeout_ms,
-            "body": hex(desc.body),
+            "body": hex(&desc.body),
         }));
         let id = self.slab.insert(caller, need, ())?;
         let code = if desc.head_target.ends_with(b"/fail") {
@@ -784,14 +784,15 @@ fn check_through_the_door(
 }
 
 /// THE LIMITS-PHASE CHECK, DRIVEN THROUGH THE DOOR: with two instances at the limits phase the sink
-/// leases `check_limits`' one refusal (naming the second and the first); at the instances phase it
+/// leases `second_instances`' one refusal (naming the second and the first); at the instances phase it
 /// has nothing to say whatever the instances. Both doors.
 #[test]
 fn the_limits_check_refuses_a_second_instance_through_the_door() {
-    let expected = serde_json::to_string(&busbar_export_otlp::check_limits(&[
-        "first".to_string(),
-        "second".to_string(),
-    ]))
+    let expected = serde_json::to_string(&busbar_contract::abi::sdk::export::second_instances(
+        &["first".to_string(), "second".to_string()],
+        busbar_export_otlp::ALIAS,
+        busbar_export_otlp::ONE_INSTANCE,
+    ))
     .unwrap();
     assert!(
         expected.contains("export.second") && expected.contains("'first'"),
@@ -882,7 +883,7 @@ fn suite_host(
     conformance_host::host(wake, anchors)
 }
 
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_export_otlp::door::door,
     cdylib: "busbar_export_otlp_plugin",
     inputs: include_str!("conformance.json"),
@@ -897,11 +898,11 @@ busbar_plugin_loader::conformance_suite! {
 mod declared_secrets {
     use std::sync::Arc;
 
-    use busbar_plugin_loader::conformance::settings_as_the_kernel_resolves;
     use busbar_plugin_loader::dispatch::kinds::export::Export;
     use busbar_plugin_loader::dispatch::{
         load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, LinkedRow, NoSink, Plugin,
     };
+    use busbar_test_kit::conformance::settings_as_the_kernel_resolves;
     use serde_json::{json, Value};
 
     fn load() -> Plugin<Export> {
