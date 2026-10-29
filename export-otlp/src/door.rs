@@ -15,29 +15,30 @@
 //! * `scrape` and `serve` — REFUSED, saying why: the sink carries no metrics and serves no route.
 //! * `status` — READY with nothing to report.
 //! * `check` — READY with nothing to report, except at the limits phase, where it returns the
-//!   one-instance refusal findings ([`crate::check_limits`]).
+//!   one-instance refusal findings ([`second_instances`], [`crate::ONE_INSTANCE`]).
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
 use busbar_contract::abi::export::{
-    cancel, CheckIn, CheckOut, DeliverIn, ExportStream, ScrapeIn, ScrapeOut, ServeIn, ServeOut,
-    StatusOut, Tail, CHECK_PHASE_LIMITS,
+    cancel, CheckIn, CheckOut, DeliverIn, ExportStream, Tail, CHECK_PHASE_LIMITS,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, InHead, OutHead, Outcome, BLOB_JSON};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
-use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::export::{instance_names, second_instances, tail};
+pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
+use busbar_contract::abi::sdk::life::{settings_as, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
-    log_target, proto, request_target, scrub, secret_parts, split_credentials, OtlpSettings,
-    CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME,
+    log_target, proto, request_target, scrub, secret_parts, split_credentials, OtlpSettings, ALIAS,
+    CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME, ONE_INSTANCE,
 };
 
 /// The one need's index in [`STATEMENT`]'s needs.
@@ -70,16 +71,7 @@ pub(crate) const NEEDS: &[Need] = &[Need {
 /// The one stream the sink carries.
 const STREAMS: &[u8] = &[ExportStream::Traces as u8];
 
-const TAIL: Tail = Tail {
-    head: KindTailHead {
-        size: std::mem::size_of::<Tail>() as u32,
-        _reserved: 0,
-    },
-    streams: STREAMS.as_ptr(),
-    streams_len: STREAMS.len(),
-    routes: std::ptr::null(),
-    routes_len: 0,
-};
+const TAIL: Tail = tail(STREAMS, &[]);
 
 /// The settings fields that may carry a credential, declared so the kernel resolves a
 /// `{env:}`/`{file:}`/`{module:}` reference written there.
@@ -95,7 +87,7 @@ pub const STATEMENT: Statement = Statement {
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
-    // refusal of a second `module: otlp` sink (`crate::check_limits`).
+    // refusal of a second `module: otlp` sink (`second_instances`).
     marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
@@ -269,15 +261,10 @@ impl Run {
 /// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
 /// instead of a bare outcome.
 pub const NO_INSTANCE: &str = "no opened otlp instance";
-/// `scrape` on a push sink: it carries no `metrics` stream.
-pub const NO_EXPOSITION: &str = "this sink carries no metrics stream, so it renders no exposition";
-/// `serve` on a sink that declares no route.
-pub const NO_ROUTE: &str = "this sink declares no route, so it serves no request";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
 fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
-    let settings =
-        OtlpSettings::parse(settings).map_err(|e| Refusal::failed(format!("settings: {e}")))?;
+    let settings: OtlpSettings = settings_as(settings)?;
     if let Some(refusal) = crate::ambiguous_url(&settings.url) {
         return Err(Refusal::failed(refusal));
     }
@@ -398,36 +385,8 @@ fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
     );
 }
 
-/// `scrape`: REFUSED, saying why — the sink carries no metrics.
-pub struct Scrape;
-
-impl SafeSlot for Scrape {
-    type In = ScrapeIn;
-    type Out = ScrapeOut;
-    type State = Held<Otlp>;
-    fn call(
-        _: Instance<'_, Held<Otlp>>,
-        _: Lent<'_, ScrapeIn>,
-        mut out: Out<'_, ScrapeOut>,
-    ) -> Outcome {
-        out.fail(Refusal::refused(NO_EXPOSITION))
-    }
-}
-
-/// `status`: nothing to report.
-pub struct Status;
-
-impl SafeSlot for Status {
-    type In = InHead;
-    type Out = StatusOut;
-    type State = Held<Otlp>;
-    fn call(_: Instance<'_, Held<Otlp>>, _: Lent<'_, InHead>, _: Out<'_, StatusOut>) -> Outcome {
-        Outcome::Ready
-    }
-}
-
 /// `check`: at the limits phase, a refusal of every instance after the first
-/// ([`crate::check_limits`]) — the sink states the `one_instance` mark, so the host asks it while
+/// ([`second_instances`]) — the sink states the `one_instance` mark, so the host asks it while
 /// the configuration is resolved; READY with nothing otherwise.
 pub struct Check;
 
@@ -446,12 +405,7 @@ impl SafeSlot for Check {
         if input.phase != CHECK_PHASE_LIMITS {
             return Outcome::Ready;
         }
-        let names: Vec<String> = input
-            .instances()
-            .iter()
-            .map(|c| String::from_utf8_lossy(c.field(|c| &c.name).bytes()).into_owned())
-            .collect();
-        let lines = crate::check_limits(&names);
+        let lines = second_instances(&instance_names(input), ALIAS, ONE_INSTANCE);
         if !lines.is_empty() {
             let json = serde_json::to_vec(&lines).unwrap_or_default();
             out.lease(|o| &o.findings, h.leases(), json, BLOB_JSON);
@@ -460,32 +414,17 @@ impl SafeSlot for Check {
     }
 }
 
-/// `serve`: REFUSED, saying why — the sink serves no route.
-pub struct Serve;
-
-impl SafeSlot for Serve {
-    type In = ServeIn;
-    type Out = ServeOut;
-    type State = Held<Otlp>;
-    fn call(
-        _: Instance<'_, Held<Otlp>>,
-        _: Lent<'_, ServeIn>,
-        mut out: Out<'_, ServeOut>,
-    ) -> Outcome {
-        out.fail(Refusal::refused(NO_ROUTE))
-    }
-}
-
 mod table {
-    use super::{Check, Deliver, Otlp, Safe, Scrape, Serve, Status};
+    use super::{Check, Deliver, Otlp, Safe};
+    use busbar_contract::abi::sdk::export::{NoScrape, NoServe, Quiet};
 
     busbar_contract::plugin_door! {
         ops: busbar_contract::abi::export::Ops,
         statement: super::STATEMENT,
         lifecycle: life(Otlp),
         kind_ops: {
-            deliver: Safe<Deliver>, scrape: Safe<Scrape>, status: Safe<Status>,
-            check: Safe<Check>, serve: Safe<Serve>,
+            deliver: Safe<Deliver>, scrape: Safe<NoScrape<Otlp>>, status: Safe<Quiet<Otlp>>,
+            check: Safe<Check>, serve: Safe<NoServe<Otlp>>,
         },
     }
 }

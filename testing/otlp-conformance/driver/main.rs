@@ -32,8 +32,8 @@ fn main() {
             std::fs::write(&args[3], b).expect("write body");
         }
         Some("send") if args.len() == 4 => {
-            let settings = OtlpSettings::parse(format!("{{\"url\":{:?}}}", args[2]).as_bytes())
-                .expect("settings");
+            let settings: OtlpSettings =
+                serde_json::from_value(serde_json::json!({ "url": args[2].as_str() })).expect("settings");
             let endpoint = Endpoint::of(&settings);
             let payload = body(&std::fs::read(&args[3]).expect("read batch"));
             let request = endpoint.request(payload).expect("endpoint names a target");
