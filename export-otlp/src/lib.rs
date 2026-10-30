@@ -37,6 +37,7 @@ pub mod door;
 pub mod proto;
 
 use busbar_contract::abi::sdk::mask::mask_url;
+use busbar_contract::abi::sdk::url::{self as sdk_url, cut_userinfo, Userinfo};
 pub use config::OtlpSettings;
 
 /// Why a second instance is refused, the tail of the limits check's line
@@ -57,9 +58,6 @@ pub const DECLARES: &str = include_str!("../declares.json");
 pub const CONTENT_TYPE: &str = "application/x-protobuf";
 /// Each export's end-to-end deadline.
 pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
-/// The HTTP Basic auth scheme prefix (RFC 7617), with its trailing space.
-const BASIC: &str = "Basic ";
-
 /// The OTLP/HTTP traces path (the specification's default), kept in a log line: it is not a secret.
 const OTLP_TRACES_PATH: &str = "/v1/traces";
 
@@ -116,11 +114,7 @@ pub fn secret_parts(url: &str) -> Vec<String> {
         }
         parts.push(u.username().to_string());
     }
-    let decoded: Vec<String> = parts
-        .iter()
-        .map(|p| String::from_utf8_lossy(&percent_decode(p)).into_owned())
-        .collect();
-    parts.extend(decoded);
+    let mut parts = sdk_url::and_decoded(parts);
     parts.retain(|p| !p.is_empty());
     parts.sort_by_key(|p| std::cmp::Reverse(p.len()));
     parts.dedup();
@@ -128,16 +122,10 @@ pub fn secret_parts(url: &str) -> Vec<String> {
 }
 
 /// `text` (the host's failure words, which may quote the target) with each of `parts`
-/// ([`secret_parts`]) replaced by `***`.
+/// ([`secret_parts`]) replaced by `***`: the SDK's `sdk::url::scrub`, unquoted.
 #[must_use]
 pub fn scrub(text: &str, parts: &[String]) -> String {
-    let mut out = text.to_string();
-    for p in parts {
-        if out.contains(p.as_str()) {
-            out = out.replace(p.as_str(), "***");
-        }
-    }
-    out
+    sdk_url::scrub(text, parts.to_vec(), false)
 }
 
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` parses but
@@ -145,19 +133,11 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything before its last `@` cut, never the credential.
-/// A url that does not parse, or has no `@` after its host, is not ambiguous here.
+/// A url that does not parse, or has no `@` after its host, is not ambiguous here. The words are
+/// the SDK's (`sdk::url::ambiguous_url`); this parser decides what the path is.
 pub fn ambiguous_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
-    if !parsed[url::Position::BeforePath..].contains('@') {
-        return None;
-    }
-    Some(format!(
-        "settings: url `{}` is ambiguous: it has an `@` after its host, so what comes before that \
-         `@` would be read as the host and path, not as a credential. Percent-encode a `/`, `?` or \
-         `#` inside the credential (`%2F`, `%3F`, `%23`), or write an `@` meant for the path as \
-         `%40`",
-        cut_userinfo(url, "***@")
-    ))
+    sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..])
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
@@ -169,17 +149,13 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
         // made of it, and its userinfo never reaches the host's dial target.
         return (cut_userinfo(endpoint, ""), None);
     };
-    let username = parsed.username().to_string();
-    let password = parsed.password().map(str::to_string);
-    if username.is_empty() && password.is_none() {
-        return (endpoint.to_string(), None);
-    }
     // The user-pass is an octet sequence (RFC 7617), and a userinfo escape encodes an octet (RFC
     // 3986): the decoded bytes are base64ed as they are, never read as text first.
-    let mut user_pass = percent_decode(&username);
-    user_pass.push(b':');
-    user_pass.extend(percent_decode(password.as_deref().unwrap_or("")));
-    let token = base64(&user_pass);
+    let Some(authorization) =
+        sdk_url::basic_authorization(parsed.username(), parsed.password(), Userinfo::Octets)
+    else {
+        return (endpoint.to_string(), None);
+    };
     let clean = if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
         let host = parsed.host_str().unwrap_or("");
         match parsed.port() {
@@ -189,7 +165,7 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     } else {
         parsed.into()
     };
-    (clean, Some(format!("{BASIC}{token}")))
+    (clean, Some(authorization))
 }
 
 /// The request target `endpoint` names: its path and query (`/` when it has no path), or `/` when
@@ -204,29 +180,15 @@ pub fn request_target(endpoint: &str) -> String {
     }
 }
 
-/// A string `url::Url` refuses (an out-of-range port, an empty host) that still carries
-/// `scheme://userinfo@…`: everything between `://` and the LAST `@` anywhere after `://` is replaced
-/// by `with` (its `@` included) — a password may hold an unescaped `/`, `?` or `#`, so no delimiter
-/// bounds the authority here. A string with an `@` in its path or query is over-cut: accepted, for
-/// it is unparsable and leaking a secret is worse than a shortened line. A string with no `@` after
-/// `://` is returned unchanged.
-fn cut_userinfo(url: &str, with: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    match rest.rfind('@') {
-        Some(at) => format!("{scheme}://{with}{}", &rest[at + 1..]),
-        None => url.to_string(),
-    }
-}
-
-/// Percent-decode a URL userinfo component to its octets (`%XX` → the byte; anything else as
-/// written), through the `percent-encoding` crate.
+/// The suite's view of the SDK's percent-decoder (`sdk::url::percent_decode`), over text.
+#[cfg(test)]
 fn percent_decode(s: &str) -> Vec<u8> {
-    percent_encoding::percent_decode_str(s).collect()
+    sdk_url::percent_decode(s.as_bytes())
 }
 
-/// Standard base64 (RFC 4648 §4, `=`-padded), through the `base64` crate.
+/// Standard base64 (RFC 4648 §4, `=`-padded) through the `base64` crate: the suite's independent
+/// check of the Basic credential the SDK encodes.
+#[cfg(test)]
 fn base64(input: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(input)
