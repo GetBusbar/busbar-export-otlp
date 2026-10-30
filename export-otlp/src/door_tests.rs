@@ -662,3 +662,10 @@ fn the_basic_authorization_rides_sealed() {
     assert_eq!(ex.framed_fields().len(), 1);
     assert!(plain.target.authorization.is_none());
 }
+
+/// The Statement states the alias rewrite (`otlp`), the one source for both doors. RED before: it
+/// stated none.
+#[test]
+fn the_statement_states_its_alias_rewrite() {
+    assert_eq!(super::STATEMENT.rewrites_len, 1);
+}
