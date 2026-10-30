@@ -102,6 +102,38 @@ pub(crate) struct Span {
     status: Option<Status>,
 }
 
+/// `ExportTraceServiceResponse` (collector/trace/v1): a collector's 2xx answer.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ExportTraceServiceResponse {
+    #[prost(message, optional, tag = "1")]
+    partial_success: Option<ExportTracePartialSuccess>,
+}
+
+/// `ExportTracePartialSuccess` (collector/trace/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct ExportTracePartialSuccess {
+    #[prost(int64, tag = "1")]
+    rejected_spans: i64,
+    /// Bytes on the wire as a string is: a message that is not UTF-8 must not lose the count.
+    #[prost(bytes = "vec", tag = "2")]
+    error_message: Vec<u8>,
+}
+
+/// What a collector's 2xx body says it rejected: `Some((rejected_spans, error_message))` when its
+/// `partial_success` rejects spans or carries a message (read lossily as text), `None` for an empty
+/// body, a body that is no `ExportTraceServiceResponse`, or a fully accepted batch.
+pub fn rejected(body: &[u8]) -> Option<(i64, String)> {
+    let partial = ExportTraceServiceResponse::decode(body)
+        .ok()?
+        .partial_success?;
+    (partial.rejected_spans > 0 || !partial.error_message.is_empty()).then(|| {
+        (
+            partial.rejected_spans,
+            String::from_utf8_lossy(&partial.error_message).into_owned(),
+        )
+    })
+}
+
 /// `Span.Event` (trace/v1).
 #[derive(Clone, PartialEq, prost::Message)]
 struct Event {
@@ -185,9 +217,11 @@ fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
 /// A record value as its `AnyValue` member, typed as the record states it (as the previous
 /// release's exporter typed a span's fields): a string its `string_value`, a boolean its
 /// `bool_value`, an integer its `int_value` (a `u64` past `i64::MAX` keeps its bits), any other
-/// number its `double_value`, an array its `array_value`; an object its JSON text.
-fn any_value(value: &Value) -> AnyValueKind {
-    match value {
+/// number its `double_value`, an array its `array_value`; an object its JSON text; a null `None`
+/// (an attribute is omitted, an array item is an `AnyValue` with no value).
+fn any_value(value: &Value) -> Option<AnyValueKind> {
+    Some(match value {
+        Value::Null => return None,
         Value::String(s) => AnyValueKind::Text(s.clone()),
         Value::Bool(b) => AnyValueKind::Bool(*b),
         Value::Number(n) => match (n.as_i64(), n.as_u64()) {
@@ -199,12 +233,12 @@ fn any_value(value: &Value) -> AnyValueKind {
             values: items
                 .iter()
                 .map(|item| AnyValue {
-                    value: Some(any_value(item)),
+                    value: any_value(item),
                 })
                 .collect(),
         }),
         other => AnyValueKind::Text(other.to_string()),
-    }
+    })
 }
 
 /// `[{key, value}, …]` as `KeyValue`s, in order.
@@ -214,9 +248,30 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
         .flatten()
         .filter_map(|kv| {
             let key = kv.get("key")?.as_str()?;
-            Some(key_value_of(key, any_value(kv.get("value")?)))
+            Some(key_value_of(key, any_value(kv.get("value")?)?))
         })
         .collect()
+}
+
+/// The one `Span` builder: the ids a record (or a full span record) states, as `source` carries
+/// them — the trace id after 8 zero bytes, the span id, the parent when present — and
+/// `SPAN_KIND_INTERNAL`; `fill` sets the rest from wherever the record states it. `None` when
+/// `source` has no usable trace or span id.
+fn build(source: &Value, fill: impl FnOnce(&mut Span)) -> Option<Span> {
+    let trace_id = id(source.get("trace_id")?)?;
+    let span_id = id(source.get("span_id")?)?;
+    let parent = source.get("parent_span_id").and_then(id);
+    let mut trace = vec![0u8; 16];
+    trace[8..].copy_from_slice(&trace_id);
+    let mut span = Span {
+        trace_id: trace,
+        span_id: span_id.to_vec(),
+        parent_span_id: parent.map(|p| p.to_vec()).unwrap_or_default(),
+        kind: SPAN_KIND_INTERNAL,
+        ..Span::default()
+    };
+    fill(&mut span);
+    Some(span)
 }
 
 /// The full span record as its `Span`: its ids and name, its start and end
@@ -224,9 +279,6 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
 /// `array_value`), its events (each its time, name and attributes), and its status (an error with
 /// its message; unset the empty status), whatever `fields:` selected.
 fn full_span(full: &Value) -> Option<Span> {
-    let trace_id = id(full.get("trace_id")?)?;
-    let span_id = id(full.get("span_id")?)?;
-    let parent = full.get("parent_span_id").and_then(id);
     let ns = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or_default();
     let text = |v: &Value, key: &str| {
         v.get(key)
@@ -234,40 +286,32 @@ fn full_span(full: &Value) -> Option<Span> {
             .unwrap_or_default()
             .to_string()
     };
-    let mut trace = vec![0u8; 16];
-    trace[8..].copy_from_slice(&trace_id);
-    let events = full
-        .get("events")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|e| Event {
-            time_unix_nano: ns(e, "time_ns"),
-            name: text(e, "name"),
-            attributes: key_values(e.get("attributes")),
-        })
-        .collect();
-    let status = full.get("status");
-    let error = status.and_then(|s| s.get("code")).and_then(Value::as_str) == Some("error");
-    let status = if error {
-        Status {
-            message: status.map(|s| text(s, "message")).unwrap_or_default(),
-            code: STATUS_CODE_ERROR,
-        }
-    } else {
-        Status::default()
-    };
-    Some(Span {
-        trace_id: trace,
-        span_id: span_id.to_vec(),
-        parent_span_id: parent.map(|p| p.to_vec()).unwrap_or_default(),
-        name: text(full, "name"),
-        kind: SPAN_KIND_INTERNAL,
-        start_time_unix_nano: ns(full, "start_ns"),
-        end_time_unix_nano: ns(full, "end_ns"),
-        attributes: key_values(full.get("attributes")),
-        events,
-        status: Some(status),
+    build(full, |span| {
+        span.events = full
+            .get("events")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|e| Event {
+                time_unix_nano: ns(e, "time_ns"),
+                name: text(e, "name"),
+                attributes: key_values(e.get("attributes")),
+            })
+            .collect();
+        let status = full.get("status");
+        let error = status.and_then(|s| s.get("code")).and_then(Value::as_str) == Some("error");
+        span.status = Some(if error {
+            Status {
+                message: status.map(|s| text(s, "message")).unwrap_or_default(),
+                code: STATUS_CODE_ERROR,
+            }
+        } else {
+            Status::default()
+        });
+        span.name = text(full, "name");
+        span.start_time_unix_nano = ns(full, "start_ns");
+        span.end_time_unix_nano = ns(full, "end_ns");
+        span.attributes = key_values(full.get("attributes"));
     })
 }
 
@@ -310,33 +354,20 @@ pub(crate) fn span(record: &Value) -> Option<Span> {
     if let Some(full) = record.get(SPAN_MEMBER).filter(|v| v.is_object()) {
         return full_span(full);
     }
-    let trace_id = id(record.get("trace_id")?)?;
-    let span_id = id(record.get("span_id")?)?;
-    let parent = record.get("parent_span_id").and_then(id);
-    let text = |key: &str| record.get(key).and_then(Value::as_str).unwrap_or_default();
     let micros = |key: &str| record.get(key).and_then(Value::as_u64).unwrap_or_default();
-    let start = micros("start").saturating_mul(1000);
-    let end = start.saturating_add(micros("duration_us").saturating_mul(1000));
-    let mut trace = vec![0u8; 16];
-    trace[8..].copy_from_slice(&trace_id);
-    let attributes = ATTRIBUTES
-        .iter()
-        .filter_map(|key| match record.get(*key) {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(key_value_of(key, any_value(value))),
-        })
-        .collect();
-    Some(Span {
-        trace_id: trace,
-        span_id: span_id.to_vec(),
-        parent_span_id: parent.map(|p| p.to_vec()).unwrap_or_default(),
-        name: text("name").to_string(),
-        kind: SPAN_KIND_INTERNAL,
-        start_time_unix_nano: start,
-        end_time_unix_nano: end,
-        attributes,
-        events: Vec::new(),
-        status: None,
+    build(record, |span| {
+        let start = micros("start").saturating_mul(1000);
+        span.name = record
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        span.start_time_unix_nano = start;
+        span.end_time_unix_nano = start.saturating_add(micros("duration_us").saturating_mul(1000));
+        span.attributes = ATTRIBUTES
+            .iter()
+            .filter_map(|key| Some(key_value_of(key, any_value(record.get(*key)?)?)))
+            .collect();
     })
 }
 
