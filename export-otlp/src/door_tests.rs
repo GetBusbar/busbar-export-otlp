@@ -634,3 +634,29 @@ fn every_declared_code_is_on_a_line() {
         );
     }
 }
+
+/// The Basic `Authorization` rides sealed: the framed head shows `<sealed>` for it (the SDK frames
+/// and wipes the value), in the same field order as before, and the instance holds the credential
+/// as a `Cred` that verifies against the Basic value. RED before: the value rode as plain bytes.
+#[test]
+fn the_basic_authorization_rides_sealed() {
+    let endpoint = Endpoint::of(&crate::OtlpSettings {
+        url: "https://us%40r:p%3Ass@collector.example:4318/v1/traces".into(),
+    });
+    let ex = endpoint.exchange(b"body".to_vec()).expect("frames");
+    let framed = ex.framed_fields();
+    assert_eq!(
+        framed,
+        [
+            (&b"content-type"[..], &b"application/x-protobuf"[..]),
+            (&b"authorization"[..], &b"<sealed>"[..]),
+        ]
+    );
+    // No credential: no sealed field.
+    let plain = Endpoint::of(&crate::OtlpSettings {
+        url: "http://127.0.0.1:4318/v1/traces".into(),
+    });
+    let ex = plain.exchange(Vec::new()).expect("frames");
+    assert_eq!(ex.framed_fields().len(), 1);
+    assert!(plain.target.authorization.is_none());
+}
