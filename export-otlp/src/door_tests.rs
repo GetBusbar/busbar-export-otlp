@@ -420,7 +420,55 @@ fn a_skipped_line_is_a_warn_line() {
     });
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(
-        lines.iter().all(|(level, _, _)| *level == tracing::Level::WARN),
+        lines
+            .iter()
+            .all(|(level, _, _)| *level == tracing::Level::WARN),
         "{lines:?}"
     );
+}
+
+// ── batch_body (T1) ─────────────────────────────────────────────────────────────────────────────
+
+/// A `traces` line for the span with id `n`.
+fn line(n: u64) -> String {
+    format!(
+        r#"{{"trace_id":"{n:016x}","span_id":"{n:016x}","name":"s{n}","start":1,"duration_us":1}}"#
+    )
+}
+
+/// The span ids (as numbers) the request `body` carries, in order.
+fn span_ids(body: &[u8]) -> Vec<u64> {
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use prost::Message as _;
+    let request = ExportTraceServiceRequest::decode(body).expect("a request");
+    request.resource_spans[0].scope_spans[0]
+        .spans
+        .iter()
+        .map(|s| u64::from_be_bytes(s.span_id.clone().try_into().expect("8 bytes")))
+        .collect()
+}
+
+/// Two valid lines are two spans, in order; a valid line after a non-JSON one is still exported;
+/// CRLF line endings, blank lines and a missing trailing newline change nothing.
+#[test]
+fn a_batch_is_split_into_its_span_lines() {
+    let (a, b, c) = (line(1), line(2), line(3));
+    let batches = [
+        (format!("{a}\n{b}\n"), vec![1, 2]),
+        (format!("{a}\n{b}"), vec![1, 2]),
+        (format!("{a}\r\n{b}\r\n"), vec![1, 2]),
+        (format!("{a}\r\n{b}"), vec![1, 2]),
+        (format!("\n\n{a}\n\n   \n{b}\n\n"), vec![1, 2]),
+        (format!("not json\n{a}\n"), vec![1]),
+        (
+            format!("{a}\n{{\"name\":\"no ids\"}}\nnot json\n{b}\n{c}"),
+            vec![1, 2, 3],
+        ),
+    ];
+    for (batch, want) in batches {
+        let body = batch_body(batch.as_bytes()).unwrap_or_else(|| panic!("{batch:?}: no body"));
+        assert_eq!(span_ids(&body), want, "{batch:?}");
+    }
+    assert_eq!(batch_body(b""), None);
+    assert_eq!(batch_body(b"\n\r\n  \n"), None);
 }
