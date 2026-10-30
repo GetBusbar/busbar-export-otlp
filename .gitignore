@@ -2,3 +2,4 @@
 # entry's `gitignore:` lines follow the fleet's own).
 /target
 /mutants.out*
+__pycache__/
