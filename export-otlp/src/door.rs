@@ -85,6 +85,9 @@ busbar_contract::statement_extensions!(EXTENSIONS: [
     (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
 ]);
 
+/// The most deliveries one instance holds in flight; past it the host sheds the batch.
+pub const MAX_INFLIGHT: u32 = 64;
+
 /// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
 pub const STATEMENT: Statement = Statement {
     extensions: EXTENSIONS,
@@ -94,7 +97,7 @@ pub const STATEMENT: Statement = Statement {
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
     // refusal of a second `module: otlp` sink (`second_instances`).
     marks: MARK_ONE_INSTANCE,
-    ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+    ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
 
 /// The most of a collector's reply body this sink buffers: the `partial_success` it reads is small.
@@ -288,8 +291,8 @@ impl Run {
     }
 }
 
-/// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
-/// instead of a bare outcome.
+/// The error text of the door's REFUSED answer to `deliver` or `check` on no opened instance, so
+/// the host's line names why instead of a bare outcome.
 pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
