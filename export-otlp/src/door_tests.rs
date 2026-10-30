@@ -669,3 +669,39 @@ fn the_basic_authorization_rides_sealed() {
 fn the_statement_states_its_alias_rewrite() {
     assert_eq!(super::STATEMENT.rewrites_len, 1);
 }
+
+/// RED before: the ambiguous-url refusal echoed everything after the last `@`, path and query
+/// included, and a collector path or query can carry a key. The echo is path-cut like every other
+/// line (`scheme://***@host[:port]`, `/***`, `?***`); the words are otherwise the SDK's.
+#[test]
+fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
+    use busbar_contract::abi::sdk::life::Life;
+    for (url, shown) in [
+        (
+            "https://tok/en@collector.example:4318/CANARYpath/x?key=CANARYquery",
+            "https://***@collector.example:4318/***?***",
+        ),
+        (
+            "https://tok/en@collector.example/v1/traces?key=CANARYquery#CANARYfrag",
+            "https://***@collector.example/***?***",
+        ),
+        (
+            "https://svc:pa/ss@collector.example/CANARYpath",
+            "https://***@collector.example/***",
+        ),
+        (
+            "https://collector.example/v1/traces?k=CANARYq@b",
+            "https://***@b",
+        ),
+    ] {
+        let settings = serde_json::json!({ "url": url }).to_string();
+        let refusal = Otlp::validate(settings.as_bytes()).expect_err(url);
+        let text = refusal.text().expect("a refusal says why");
+        assert!(text.contains("is ambiguous"), "{text}");
+        assert!(!text.contains("CANARY"), "{url}: {text}");
+        assert!(
+            text.contains(&format!("url `{shown}` is ambiguous")),
+            "{url}: {text}"
+        );
+    }
+}
