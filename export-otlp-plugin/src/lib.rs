@@ -4,8 +4,8 @@
 //! The **OTLP trace export sink as a droppable busbar plugin** — the `cdylib` a signed tarball of
 //! the sink carries (`kind: export`, alias `otlp`): the logic crate re-exported whole, and its door
 //! (`busbar_export_otlp::door::door`) exported as this image's ONE symbol, `busbar_plugin_door`
-//! (`export_door!`). The logic crate is `#![forbid(unsafe_code)]` and exports
-//! nothing, so a build that links it carries no door symbol. Pack it with `busbar-plugin-pack
+//! (`export_door!`), behind the `dropped-in` feature, so a build that links this crate as a row
+//! carries no door symbol either. The logic crate is `#![forbid(unsafe_code)]` and exports nothing. Pack it with `busbar-plugin-pack
 //! --kind export --alias otlp --declares-file export-otlp/declares.json`.
 //!
 //! This crate is `deny`, not `forbid`: the export macro's `#[unsafe(no_mangle)]` is the one
@@ -14,7 +14,9 @@
 
 pub use busbar_export_otlp::*;
 
-/// The exported door: the macro's `#[no_mangle]` symbol is the one exemption.
+/// The exported door, behind `dropped-in` (the cdylib build only): the macro's `#[no_mangle]` symbol is
+/// the one exemption.
+#[cfg(feature = "dropped-in")]
 #[allow(unsafe_code)]
 mod exported {
     busbar_contract::export_door!(busbar_export_otlp::door::door);
