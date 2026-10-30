@@ -56,7 +56,9 @@ use busbar_plugin_loader::dispatch::{
     DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, LoadError, Metric, Plugin,
     NO_BLOB,
 };
-use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use prost::Message as _;
 use serde_json::{json, Value};
 
@@ -102,6 +104,8 @@ struct Collector {
     declared: Mutex<HashMap<(InstanceId, NeedId), Declared>>,
     carried: Mutex<Vec<Value>>,
     replies: Mutex<HashMap<ConnId, VecDeque<Piece>>>,
+    /// The body bytes each connection's `Body` pieces fill the read buffer with, in order.
+    bodies: Mutex<HashMap<ConnId, VecDeque<Vec<u8>>>>,
 }
 
 /// The egress verdict on `target` under `class`.
@@ -202,18 +206,33 @@ impl Conns for Collector {
             "body": hex(&desc.body),
         }));
         let id = self.slab.insert(caller, need, ())?;
-        let code = if desc.head_target.ends_with(b"/fail") {
-            503
-        } else {
-            200
-        };
-        self.replies.lock().unwrap().insert(
-            id,
-            VecDeque::from([
-                piece(PieceKind::Fields, Some(code)),
-                piece(PieceKind::Completion, None),
-            ]),
-        );
+        let code =
+            if desc.head_target.ends_with(b"/fail") || desc.head_target.ends_with(b"/bigfail") {
+                503
+            } else {
+                200
+            };
+        let mut pieces = VecDeque::from([piece(PieceKind::Fields, Some(code))]);
+        if desc.head_target.ends_with(b"/big") || desc.head_target.ends_with(b"/bigfail") {
+            // A reply body past the sink's bound that, read whole, says `partial_success` rejected
+            // 5 spans: an unknown length-delimited field pads a valid response to 80 KB.
+            let mut body = ExportTraceServiceResponse {
+                partial_success: Some(ExportTracePartialSuccess {
+                    rejected_spans: 5,
+                    error_message: "too big".into(),
+                }),
+            }
+            .encode_to_vec();
+            body.extend_from_slice(&[0x7a, 0x80, 0xf1, 0x04]); // field 15, 80_000 bytes
+            body.resize(body.len() + 80_000, 0);
+            let chunks: VecDeque<Vec<u8>> = body.chunks(8192).map(<[u8]>::to_vec).collect();
+            for _ in &chunks {
+                pieces.push_back(piece(PieceKind::Body, None));
+            }
+            self.bodies.lock().unwrap().insert(id, chunks);
+        }
+        pieces.push_back(piece(PieceKind::Completion, None));
+        self.replies.lock().unwrap().insert(id, pieces);
         Ok(id)
     }
 
@@ -229,14 +248,27 @@ impl Conns for Collector {
         Ok(b.len())
     }
 
-    fn read(&self, c: InstanceId, id: ConnId, _: u64, _: &mut [u8]) -> Result<Piece, ConnError> {
+    fn read(&self, c: InstanceId, id: ConnId, _: u64, buf: &mut [u8]) -> Result<Piece, ConnError> {
         self.slab.get(c, id)?;
-        self.replies
+        let mut piece = self
+            .replies
             .lock()
             .unwrap()
             .get_mut(&id)
             .and_then(VecDeque::pop_front)
-            .ok_or(ConnError::Closed)
+            .ok_or(ConnError::Closed)?;
+        if piece.kind == PieceKind::Body {
+            let chunk = self
+                .bodies
+                .lock()
+                .unwrap()
+                .get_mut(&id)
+                .and_then(VecDeque::pop_front)
+                .ok_or(ConnError::Closed)?;
+            buf[..chunk.len()].copy_from_slice(&chunk);
+            piece.len = chunk.len();
+        }
+        Ok(piece)
     }
 
     fn wait(&self, _: InstanceId, _: &[ConnId], _: u64) -> Result<usize, ConnError> {
@@ -647,7 +679,7 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
 
     // The log: enabled on the first carried export of each instance and again after the refresh
     // that moved its target (the need is re-declared), the record that is no span
-    // at debug, every dropped export at warn, the endpoint always masked (userinfo, and any path but
+    // at warn, every dropped export at warn, the endpoint always masked (userinfo, and any path but
     // OTLP's own `/v1/traces`, CREDENTIAL-LOCKDOWN H3); a refused target disabled.
     let lines: Vec<String> = linked["lines"]
         .as_array()
@@ -715,6 +747,41 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
         other, linked,
         "a door over another config must not compare equal"
     );
+}
+
+/// THE REPLY BOUND, end to end through the host's connector: a 2xx reply whose 80 KB body (read
+/// whole it says `partial_success` rejected 5 spans) passes the sink's 64 KiB bound is a delivered
+/// batch, with no rejection line and no dropped-export line; the same body on a 503 is the usual
+/// non-2xx drop with its status. Without `reply_limit` the first would log the rejection; without
+/// the past-bound rewrite it would log a failed export.
+#[test]
+fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
+    for dropped in [false, true] {
+        let host = Host::new();
+        let p = load(&host, dropped);
+        open(&p, r#"{"url":"https://collector.example/big"}"#);
+        deliver(&host, &p, &[record("0000000000000031", None)]);
+        let lines = host.lines.0.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("OTLP tracing enabled"), "{lines:?}");
+
+        let q = load(&host, dropped);
+        open(&q, r#"{"url":"https://collector.example/bigfail"}"#);
+        deliver(&host, &q, &[record("0000000000000032", None)]);
+        let lines = host.lines.0.lock().unwrap().clone();
+        let non_2xx: Vec<_> = lines
+            .iter()
+            .filter(|l| l.contains("returned a non-2xx status"))
+            .collect();
+        assert_eq!(non_2xx.len(), 1, "{lines:?}");
+        assert!(non_2xx[0].contains("status=503"), "{lines:?}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("rejected part") || l.contains("export failed")),
+            "{lines:?}"
+        );
+    }
 }
 
 /// RED: the door asked for as another kind is refused, by either origin, before any slot runs.

@@ -128,8 +128,8 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
     sdk_url::scrub(text, parts.to_vec(), false)
 }
 
-/// The ambiguous-URL refusal: `Some(the refusal)` when `url` parses but
-/// carries an `@` after its host — `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
+/// The ambiguous-URL refusal: `Some(the refusal)` when `url` carries an `@` after its host —
+/// `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything before its last `@` cut, never the credential.
