@@ -844,3 +844,29 @@ fn the_span_member_wins_over_projected_fields() {
     });
     assert_eq!(span_of(&both).unwrap().name, "full");
 }
+
+/// RED before: a JSON null attribute value became the string "null" on the full-span path (the
+/// projected path omits nulls). A null attribute is omitted; a null inside an array is an
+/// `AnyValue` with no value.
+#[test]
+fn a_null_attribute_is_omitted_and_a_null_array_item_is_an_empty_any_value() {
+    let span = span_of(&full(json!({
+        "attributes": [
+            {"key": "x", "value": null},
+            {"key": "kept", "value": "v"},
+            {"key": "arr", "value": [1, null]},
+        ],
+        "events": [{"name": "e", "time_ns": 1, "attributes": [{"key": "y", "value": null}]}],
+    })))
+    .unwrap();
+    let keys: Vec<&str> = span.attributes.iter().map(|a| a.key.as_str()).collect();
+    assert_eq!(keys, ["kept", "arr"], "{:?}", span.attributes);
+    let Some(any_value::Value::ArrayValue(array)) = span.attributes[1].value.clone().unwrap().value
+    else {
+        panic!("an array value");
+    };
+    assert_eq!(array.values.len(), 2);
+    assert_eq!(array.values[0].value, Some(any_value::Value::IntValue(1)));
+    assert_eq!(array.values[1].value, None);
+    assert!(span.events[0].attributes.is_empty(), "{:?}", span.events);
+}
