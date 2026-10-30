@@ -34,6 +34,18 @@ cargo build --release -p busbar-export-otlp-plugin --features dropped-in
 cargo test --workspace --locked
 ```
 
+### Conformance
+
+`bash testing/conformance/run.sh` runs every suite listed in `testing/conformance/suites.tsv` (here one, `otlp`) against busbar at the commit in `.busbar-ref`, and writes one verdict per suite to `target/conformance/verdicts/<id>.json`; it exits 0 only when every suite passed. `--selftest` checks the verdict judge against planted verdicts. It needs docker for the suite and fetches pinned `rust` and `node` toolchains (`testing/conformance/tools.sh`) when they are not on `PATH`.
+
+`testing/otlp-conformance/run.sh` is the `otlp` suite: the plugin's request builder against the official OpenTelemetry Collector (contrib 0.163.2, pinned by image digest). Three legs, all of which must hold:
+
+- control: `telemetrygen` (0.163.0, pinned by digest) sends traces, metrics and logs over OTLP/HTTP and OTLP/gRPC to the collector, and all of it must arrive well formed.
+- negative control: a corrupt protobuf body (garbage and truncated) and a wrong or unusable content-type must be answered with a 4xx and write nothing, and the span comparison must catch each of a set of planted losses (a dropped attribute, a shifted timestamp, a changed id).
+- subject: a driver built from this repo's `export-otlp` crate against busbar at the pin builds the request for `testing/otlp-conformance/fixture.jsonl` and POSTs it to the collector; the collector's file output is compared with what the fixture says must arrive (ids, names, timestamps, typed attributes, events, status, resource and scope).
+
+The plugin exports traces only, so metrics and logs are covered by the control alone.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
