@@ -185,9 +185,11 @@ fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
 /// A record value as its `AnyValue` member, typed as the record states it (as the previous
 /// release's exporter typed a span's fields): a string its `string_value`, a boolean its
 /// `bool_value`, an integer its `int_value` (a `u64` past `i64::MAX` keeps its bits), any other
-/// number its `double_value`, an array its `array_value`; an object its JSON text.
-fn any_value(value: &Value) -> AnyValueKind {
-    match value {
+/// number its `double_value`, an array its `array_value`; an object its JSON text; a null `None`
+/// (an attribute is omitted, an array item is an `AnyValue` with no value).
+fn any_value(value: &Value) -> Option<AnyValueKind> {
+    Some(match value {
+        Value::Null => return None,
         Value::String(s) => AnyValueKind::Text(s.clone()),
         Value::Bool(b) => AnyValueKind::Bool(*b),
         Value::Number(n) => match (n.as_i64(), n.as_u64()) {
@@ -199,12 +201,12 @@ fn any_value(value: &Value) -> AnyValueKind {
             values: items
                 .iter()
                 .map(|item| AnyValue {
-                    value: Some(any_value(item)),
+                    value: any_value(item),
                 })
                 .collect(),
         }),
         other => AnyValueKind::Text(other.to_string()),
-    }
+    })
 }
 
 /// `[{key, value}, …]` as `KeyValue`s, in order.
@@ -214,7 +216,7 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
         .flatten()
         .filter_map(|kv| {
             let key = kv.get("key")?.as_str()?;
-            Some(key_value_of(key, any_value(kv.get("value")?)))
+            Some(key_value_of(key, any_value(kv.get("value")?)?))
         })
         .collect()
 }
@@ -321,10 +323,7 @@ pub(crate) fn span(record: &Value) -> Option<Span> {
     trace[8..].copy_from_slice(&trace_id);
     let attributes = ATTRIBUTES
         .iter()
-        .filter_map(|key| match record.get(*key) {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(key_value_of(key, any_value(value))),
-        })
+        .filter_map(|key| Some(key_value_of(key, any_value(record.get(*key)?)?)))
         .collect();
     Some(Span {
         trace_id: trace,
