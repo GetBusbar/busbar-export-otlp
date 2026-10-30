@@ -314,3 +314,16 @@ fn every_refusal_names_its_cause_through_the_door() {
     );
     assert_eq!(closed.outcome, Outcome::Ready);
 }
+
+/// RED before: a url the parser cannot parse at all (`svc:pa` is no port) skipped the ambiguity
+/// check, so a credential holding an unescaped `/` was silently dropped from the request. It is
+/// refused, the credential cut from the words.
+#[test]
+fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
+    use busbar_contract::abi::sdk::life::Life;
+    let settings = br#"{"url":"https://svc:pa/ss@collector.example/v1/traces"}"#;
+    let refusal = Otlp::validate(settings).expect_err("refused");
+    let text = refusal.text().expect("a refusal says why");
+    assert!(text.contains("is ambiguous"), "{text}");
+    assert!(!text.contains("pa/ss") && !text.contains("svc:"), "{text}");
+}
