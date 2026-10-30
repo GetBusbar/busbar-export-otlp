@@ -27,10 +27,9 @@ serde_json = { workspace = true }
 # URL, and is masked in every line this sink writes.
 url = { workspace = true }
 # The OTLP request's protobuf encoding (the fleet's protobuf library; its derive writes the eleven
-# messages this sink sends), and the userinfo's percent-decoding and Basic base64.
+# messages this sink sends). The userinfo's percent-decoding and Basic base64 are the SDK's
+# (`busbar_contract::abi::sdk::url`).
 prost = { workspace = true, features = ["derive"] }
-percent-encoding = { workspace = true }
-base64 = { workspace = true }
 # The sink's own operator lines (enabled, disabled, a dropped export): the door's call capture
 # carries them, linked or dropped in, to the instance's own log (THE DESIGN §11.2 Plugin logging).
 tracing = { workspace = true }
@@ -41,6 +40,8 @@ tracing = { workspace = true }
 # checked against the proto's publisher, not against this crate's own encoder. Test-only.
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true, features = ["default"] }
+# Standard base64, the suite's independent check of the Basic credential the SDK encodes. Test-only.
+base64 = { workspace = true }
 # The contract's test kit (a fake host and a door driven op by op, safe Rust): dev-only, so no shipped
 # image carries it.
 busbar-contract = { workspace = true, features = ["test-seal"] }
