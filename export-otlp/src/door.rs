@@ -30,7 +30,9 @@ use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::exchange::{
+    exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
+};
 use busbar_contract::abi::sdk::export::{instance_names, second_instances, tail};
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
 use busbar_contract::abi::sdk::life::{settings_as, Held, Life, Refreshed, Refusal};
@@ -40,6 +42,9 @@ use crate::{
     log_target, proto, request_target, scrub, secret_parts, split_credentials, OtlpSettings, ALIAS,
     CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME, ONE_INSTANCE,
 };
+
+/// The settings path the need's target is read from.
+pub(crate) const TARGET_FROM: &str = "settings.url";
 
 /// The one need's index in [`STATEMENT`]'s needs.
 pub const NEED: u32 = 0;
@@ -55,7 +60,7 @@ pub(crate) const NEEDS: &[Need] = &[Need {
     egress_class: EGRESS_LOOPBACK_ALLOWED,
     transport: abi_str("http"),
     auth: abi_str(""),
-    target_from: abi_str("settings.url"),
+    target_from: abi_str(TARGET_FROM),
     trust_from: abi_str(""),
     details: Blob::ABSENT,
     keep_response_headers: std::ptr::null(),
@@ -83,6 +88,9 @@ busbar_contract::statement_extensions!(EXTENSIONS: [
     (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
 ]);
 
+/// The most deliveries one instance holds in flight; past it the host sheds the batch.
+pub const MAX_INFLIGHT: u32 = 64;
+
 /// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
 pub const STATEMENT: Statement = Statement {
     extensions: EXTENSIONS,
@@ -92,27 +100,37 @@ pub const STATEMENT: Statement = Statement {
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
     // refusal of a second `module: otlp` sink (`second_instances`).
     marks: MARK_ONE_INSTANCE,
-    ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+    ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
+
+/// The most of a collector's reply body this sink buffers: the `partial_success` it reads is small.
+const REPLY_LIMIT: usize = 64 * 1024;
 
 const METHOD: &[u8] = b"POST";
 const CONTENT_TYPE_FIELD: &[u8] = b"content-type";
 const AUTHORIZATION_FIELD: &[u8] = b"authorization";
 
+/// The request target and credential of an endpoint's exports.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The request target: the settings' path and query.
+    pub path: String,
+    /// The `Authorization` the settings' userinfo became, if it carried one.
+    pub authorization: Option<String>,
+}
+
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
 /// the collector is named as every line names it, the request target and the `Authorization` the
 /// url's userinfo became are redacted.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// The settings' URL as every line names it ([`log_target`]: userinfo, a non-OTLP path and the
     /// query masked).
     pub shown: String,
-    /// The collector the host dials — the settings' URL without its userinfo; `None` only for the
-    /// default endpoint, which names none.
-    pub collector: Option<String>,
-    /// The request target (path and query) and the `Authorization` the userinfo became; `None`
-    /// only for the default endpoint, which names none.
-    pub target: Option<(String, Option<String>)>,
+    /// The collector the host dials — the settings' URL without its userinfo.
+    pub collector: String,
+    /// What each request carries besides the body.
+    pub target: Target,
     /// The parts of the settings' URL cut from the host's text before it is logged
     /// ([`secret_parts`]).
     pub secrets: Vec<String>,
@@ -120,13 +138,13 @@ pub struct Endpoint {
 
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let target = self
-            .target
-            .as_ref()
-            .map(|(_, authorization)| ("<redacted>", authorization.as_ref().map(|_| "<redacted>")));
+        let target = (
+            "<redacted>",
+            self.target.authorization.as_ref().map(|_| "<redacted>"),
+        );
         f.debug_struct("Endpoint")
             .field("shown", &self.shown)
-            .field("collector", &self.collector.as_deref().map(log_target))
+            .field("collector", &log_target(&self.collector))
             .field("target", &target)
             .finish_non_exhaustive()
     }
@@ -137,18 +155,30 @@ impl Endpoint {
     #[must_use]
     pub fn of(settings: &OtlpSettings) -> Self {
         let (clean, authorization) = split_credentials(&settings.url);
+        let mut secrets = secret_parts(&settings.url);
+        // A collector may echo the request's `Authorization` back: the header value and its token.
+        if let Some(value) = &authorization {
+            secrets.extend(value.strip_prefix("Basic ").map(str::to_owned));
+            secrets.push(value.clone());
+        }
         Self {
             shown: log_target(&settings.url),
-            target: Some((request_target(&clean), authorization)),
-            collector: Some(clean),
-            secrets: secret_parts(&settings.url),
+            target: Target {
+                path: request_target(&clean),
+                authorization,
+            },
+            collector: clean,
+            secrets,
         }
     }
 
-    /// The request carrying `body` to this endpoint; `None` when it names none.
+    /// The request carrying `body` to this endpoint.
     #[must_use]
-    pub fn request(&self, body: Vec<u8>) -> Option<Request> {
-        let (target, authorization) = self.target.as_ref()?;
+    pub fn request(&self, body: Vec<u8>) -> Request {
+        let Target {
+            path: target,
+            authorization,
+        } = &self.target;
         let mut fields = Vec::with_capacity(2);
         fields.push((
             CONTENT_TYPE_FIELD.to_vec(),
@@ -157,13 +187,13 @@ impl Endpoint {
         if let Some(value) = authorization {
             fields.push((AUTHORIZATION_FIELD.to_vec(), value.as_bytes().to_vec()));
         }
-        Some(Request {
+        Request {
             method: METHOD.to_vec(),
             target: target.as_bytes().to_vec(),
             fields,
             body,
             timeout_ms: EXPORT_TIMEOUT_MS,
-        })
+        }
     }
 }
 
@@ -250,7 +280,16 @@ impl Run {
             }
         }
         match result {
-            Ok(reply) if (200..300).contains(&reply.status) => {}
+            Ok(reply) if (200..300).contains(&reply.status) => {
+                if let Some((rejected_spans, message)) = proto::rejected(&reply.body) {
+                    tracing::warn!(
+                        endpoint = %shown,
+                        rejected_spans,
+                        "OTLP collector rejected part of this batch: {:?}",
+                        capped(&scrub(&message, secrets))
+                    );
+                }
+            }
             Ok(reply) => tracing::warn!(
                 endpoint = %shown,
                 status = reply.status,
@@ -261,8 +300,8 @@ impl Run {
     }
 }
 
-/// The error texts of the door's REFUSED answers: one per cause, so the host's line names why
-/// instead of a bare outcome.
+/// The error text of the door's REFUSED answer to `deliver` or `check` on no opened instance, so
+/// the host's line names why instead of a bare outcome.
 pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
@@ -294,8 +333,11 @@ impl Life for Otlp {
     }
 }
 
-/// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped.
-fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
+/// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped: the
+/// one pipeline from a `traces` batch to its request, the door's delivery and the conformance
+/// driver both (a record encodes through [`proto::span`] and [`proto::encode`], as
+/// [`proto::export_request`] does for records already parsed).
+pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
     let mut spans = Vec::new();
     for line in batch
         .split(|b| *b == b'\n')
@@ -304,9 +346,9 @@ fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(record) => match proto::span(&record) {
                 Some(span) => spans.push(span),
-                None => tracing::debug!("OTLP span export skipped a record with no span identity"),
+                None => tracing::warn!("OTLP span export skipped a record with no span identity"),
             },
-            Err(_) => tracing::debug!("OTLP span export skipped a line that is not JSON"),
+            Err(_) => tracing::warn!("OTLP span export skipped a line that is not JSON"),
         }
     }
     proto::encode(spans)
@@ -341,11 +383,9 @@ impl SafeSlot for Deliver {
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
-                let Some(request) = endpoint.request(body) else {
-                    return Outcome::Ready;
-                };
-                match Exchange::request(request) {
-                    Ok(state) => (state, run),
+                match Exchange::request(endpoint.request(body)) {
+                    // Only the collector's `partial_success` is read from the body: a small bound.
+                    Ok(state) => (state.reply_limit(REPLY_LIMIT), run),
                     Err(e) => {
                         dropped(&endpoint.shown, &endpoint.secrets, &e);
                         return Outcome::Ready;
@@ -358,7 +398,7 @@ impl SafeSlot for Deliver {
                 &mut host.connector(instance.ticket()),
                 &mut state,
                 NEED,
-                run.endpoint.collector.as_deref(),
+                Some(run.endpoint.collector.as_str()),
             ),
             None => Poll::Ready(Err(ConnFailure::Unarmed)),
         };
@@ -371,10 +411,41 @@ impl SafeSlot for Deliver {
                 Outcome::Pending
             }
             Poll::Ready(result) => {
+                let result = delivered_past_bound(result, state.head_status());
                 held.life().settle(&run, &result);
                 Outcome::Ready
             }
         }
+    }
+}
+
+/// The most characters of a collector's message one line carries.
+const MESSAGE_CAP: usize = 256;
+
+/// `text` cut to [`MESSAGE_CAP`] characters, then `…`.
+fn capped(text: &str) -> String {
+    match text.char_indices().nth(MESSAGE_CAP) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
+    }
+}
+
+/// A reply whose body passed [`REPLY_LIMIT`] fails the exchange ([`REPLY_OVER_BOUND`]) after its
+/// head was read. The batch reached the collector all the same: with a head status, the answer is
+/// that status with no body (a 2xx is delivered, its `partial_success` unread; any other status is
+/// the usual non-2xx drop, status named). Any other failure, or one with no head, stands.
+fn delivered_past_bound(
+    result: Result<ExchangeResponse, ConnFailure>,
+    head_status: Option<u16>,
+) -> Result<ExchangeResponse, ConnFailure> {
+    match (&result, head_status) {
+        (Err(ConnFailure::Failed(text)), Some(status)) if text == REPLY_OVER_BOUND => {
+            Ok(ExchangeResponse {
+                status,
+                ..ExchangeResponse::default()
+            })
+        }
+        _ => result,
     }
 }
 

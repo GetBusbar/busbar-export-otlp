@@ -82,10 +82,7 @@ fn a_line_that_is_not_json_is_logged_as_not_json() {
 /// nor the "OTLP tracing enabled" line, and the dropped-export line names the OLD endpoint.
 #[test]
 fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
-    let at = |url: &str| Endpoint {
-        shown: url.into(),
-        ..Endpoint::default()
-    };
+    let at = |url: &str| Endpoint::of(&crate::OtlpSettings { url: url.into() });
     let otlp = Otlp {
         run: RwLock::new(Otlp::start(at("https://a.example/v1/traces"))),
     };
@@ -185,10 +182,9 @@ fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
 fn a_dropped_export_is_a_warn_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let otlp = Otlp {
-        run: RwLock::new(Otlp::start(Endpoint {
-            shown: "https://c.example/v1/traces".into(),
-            ..Endpoint::default()
-        })),
+        run: RwLock::new(Otlp::start(Endpoint::of(&crate::OtlpSettings {
+            url: "https://c.example/v1/traces".into(),
+        }))),
     };
     let run = otlp.run();
     // The first answer settles the run (admitted); the next two are drops.
@@ -313,4 +309,236 @@ fn every_refusal_names_its_cause_through_the_door() {
         head(),
     );
     assert_eq!(closed.outcome, Outcome::Ready);
+}
+
+/// RED before: a url the parser cannot parse at all (`svc:pa` is no port) skipped the ambiguity
+/// check, so a credential holding an unescaped `/` was silently dropped from the request. It is
+/// refused, the credential cut from the words.
+#[test]
+fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
+    use busbar_contract::abi::sdk::life::Life;
+    let settings = br#"{"url":"https://svc:pa/ss@collector.example/v1/traces"}"#;
+    let refusal = Otlp::validate(settings).expect_err("refused");
+    let text = refusal.text().expect("a refusal says why");
+    assert!(text.contains("is ambiguous"), "{text}");
+    assert!(!text.contains("pa/ss") && !text.contains("svc:"), "{text}");
+}
+
+/// An `ExportTraceServiceResponse` body carrying `partial_success`, encoded by the OpenTelemetry
+/// project's own types.
+fn partial_success_body(rejected_spans: i64, error_message: &str) -> Vec<u8> {
+    use opentelemetry_proto::tonic::collector::trace::v1::{
+        ExportTracePartialSuccess, ExportTraceServiceResponse,
+    };
+    use prost::Message as _;
+    ExportTraceServiceResponse {
+        partial_success: Some(ExportTracePartialSuccess {
+            rejected_spans,
+            error_message: error_message.to_string(),
+        }),
+    }
+    .encode_to_vec()
+}
+
+/// An admitted run at `url`, for the answers a 2xx carries.
+fn admitted_run(url: &str) -> (Otlp, std::sync::Arc<super::Run>) {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let settings = crate::OtlpSettings { url: url.into() };
+    let otlp = Otlp {
+        run: RwLock::new(Otlp::start(Endpoint::of(&settings))),
+    };
+    let run = otlp.run();
+    otlp.settle(
+        &run,
+        &Ok(ExchangeResponse {
+            status: 200,
+            ..ExchangeResponse::default()
+        }),
+    );
+    (otlp, run)
+}
+
+/// RED before: a 2xx whose `partial_success` rejected spans dropped them without a word. It is one
+/// warn line with the count and the collector's (scrubbed) message; an empty or undecodable 2xx
+/// body stays a success with no line.
+#[test]
+fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://u:SECRETpw@c.example/v1/traces");
+    let reply = |body: Vec<u8>| {
+        Ok(ExchangeResponse {
+            status: 200,
+            body,
+            ..ExchangeResponse::default()
+        })
+    };
+    let lines = captured(|| {
+        otlp.settle(&run, &reply(partial_success_body(3, "too old SECRETpw")));
+    });
+    assert_eq!(
+        lines,
+        [(
+            tracing::Level::WARN,
+            "OTLP collector rejected part of this batch: \"too old ***\"".to_string(),
+            " endpoint=https://***@c.example/v1/traces rejected_spans=3".to_string()
+        )]
+    );
+    // A count alone, with no message, is still a rejection.
+    let lines = captured(|| otlp.settle(&run, &reply(partial_success_body(2, ""))));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    // Nothing rejected, an empty body, and a body that is no response: silent successes.
+    for body in [
+        partial_success_body(0, ""),
+        Vec::new(),
+        b"\xff\xff not protobuf".to_vec(),
+    ] {
+        let lines = captured(|| otlp.settle(&run, &reply(body.clone())));
+        assert!(lines.is_empty(), "{body:?}: {lines:?}");
+    }
+}
+
+/// A reply whose body passes the bound fails the exchange after its head; the batch reached the
+/// collector, so a 2xx is delivered and any other status is the usual non-2xx drop with its status.
+/// A failure with no head, or any other failure, stays a failure.
+#[test]
+fn a_reply_past_the_bound_keeps_its_head_status() {
+    use super::{delivered_past_bound, REPLY_OVER_BOUND};
+    let over = || Err(ConnFailure::Failed(REPLY_OVER_BOUND.to_string()));
+    let ok = delivered_past_bound(over(), Some(200)).expect("delivered");
+    assert_eq!((ok.status, ok.body.is_empty()), (200, true));
+    let (otlp, run) = admitted_run("https://c.example/v1/traces");
+    let refused = delivered_past_bound(over(), Some(503)).expect("a status, not a failure");
+    let lines = captured(|| otlp.settle(&run, &Ok(refused)));
+    assert_eq!(
+        lines,
+        [(
+            tracing::Level::WARN,
+            "OTLP span export returned a non-2xx status; this batch was dropped".to_string(),
+            " endpoint=https://c.example/v1/traces status=503".to_string()
+        )]
+    );
+    assert!(delivered_past_bound(over(), None).is_err());
+    let reset = Err(ConnFailure::Failed("connection reset".into()));
+    assert!(delivered_past_bound(reset, Some(200)).is_err());
+}
+
+/// RED before: the two skipped-line notices were debug, so at the default level a dropped line said
+/// nothing. A skipped line is a warn.
+#[test]
+fn a_skipped_line_is_a_warn_line() {
+    let lines = captured(|| {
+        assert_eq!(batch_body(b"not json\n{\"name\":\"no ids\"}\n"), None);
+    });
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .all(|(level, _, _)| *level == tracing::Level::WARN),
+        "{lines:?}"
+    );
+}
+
+// ── batch_body (T1) ─────────────────────────────────────────────────────────────────────────────
+
+/// A `traces` line for the span with id `n`.
+fn line(n: u64) -> String {
+    format!(
+        r#"{{"trace_id":"{n:016x}","span_id":"{n:016x}","name":"s{n}","start":1,"duration_us":1}}"#
+    )
+}
+
+/// The span ids (as numbers) the request `body` carries, in order.
+fn span_ids(body: &[u8]) -> Vec<u64> {
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use prost::Message as _;
+    let request = ExportTraceServiceRequest::decode(body).expect("a request");
+    request.resource_spans[0].scope_spans[0]
+        .spans
+        .iter()
+        .map(|s| u64::from_be_bytes(s.span_id.clone().try_into().expect("8 bytes")))
+        .collect()
+}
+
+/// Two valid lines are two spans, in order; a valid line after a non-JSON one is still exported;
+/// CRLF line endings, blank lines and a missing trailing newline change nothing.
+#[test]
+fn a_batch_is_split_into_its_span_lines() {
+    let (a, b, c) = (line(1), line(2), line(3));
+    let batches = [
+        (format!("{a}\n{b}\n"), vec![1, 2]),
+        (format!("{a}\n{b}"), vec![1, 2]),
+        (format!("{a}\r\n{b}\r\n"), vec![1, 2]),
+        (format!("{a}\r\n{b}"), vec![1, 2]),
+        (format!("\n\n{a}\n\n   \n{b}\n\n"), vec![1, 2]),
+        (format!("not json\n{a}\n"), vec![1]),
+        (
+            format!("{a}\n{{\"name\":\"no ids\"}}\nnot json\n{b}\n{c}"),
+            vec![1, 2, 3],
+        ),
+    ];
+    for (batch, want) in batches {
+        let body = batch_body(batch.as_bytes()).unwrap_or_else(|| panic!("{batch:?}: no body"));
+        assert_eq!(span_ids(&body), want, "{batch:?}");
+    }
+    assert_eq!(batch_body(b""), None);
+    assert_eq!(batch_body(b"\n\r\n  \n"), None);
+}
+
+/// RED before: the collector's `partial_success` message was scrubbed with the url's parts alone, so
+/// a collector echoing the request's `Authorization: Basic <token>` logged a reversible credential.
+#[test]
+fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://opsuser:hunter2@c.example/v1/traces");
+    let token = run
+        .endpoint
+        .target
+        .authorization
+        .clone()
+        .and_then(|a| a.strip_prefix("Basic ").map(str::to_owned))
+        .expect("a Basic authorization");
+    for echo in [format!("Basic {token}"), token.clone()] {
+        let reply = Ok(ExchangeResponse {
+            status: 200,
+            body: partial_success_body(1, &format!("bad header authorization: {echo}")),
+            ..ExchangeResponse::default()
+        });
+        let lines = captured(|| otlp.settle(&run, &reply));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let text = format!("{lines:?}");
+        assert!(!text.contains(&token), "the token was logged: {text}");
+    }
+}
+
+/// RED before: the collector's message was printed raw and whole (a newline forged a line, a long
+/// one filled the log) and a message that is not UTF-8 made the whole answer undecodable, so the
+/// rejected count was lost. The message is logged Debug-quoted and capped at 256 characters, and
+/// the count is reported whatever the message bytes.
+#[test]
+fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://c.example/v1/traces");
+    let reply = |body: Vec<u8>| {
+        Ok(ExchangeResponse {
+            status: 200,
+            body,
+            ..ExchangeResponse::default()
+        })
+    };
+    let long = format!("a\nINJECTED{}", "x".repeat(400));
+    let lines = captured(|| otlp.settle(&run, &reply(partial_success_body(1, &long))));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let message = &lines[0].1;
+    assert!(!message.contains('\n'), "{message:?}");
+    assert!(message.contains("a\\nINJECTED"), "{message:?}");
+    assert!(message.ends_with("…\""), "{message:?}");
+    assert!(message.chars().count() < 256 + 80, "{message:?}");
+
+    // `PartialSuccess { rejected_spans: 4, error_message: [0xff, 'a'] }`, by hand.
+    let inner = [0x08, 0x04, 0x12, 0x02, 0xff, b'a'];
+    let mut body = vec![0x0a, inner.len() as u8];
+    body.extend_from_slice(&inner);
+    let lines = captured(|| otlp.settle(&run, &reply(body)));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].2.contains("rejected_spans=4"), "{lines:?}");
 }

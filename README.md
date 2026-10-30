@@ -16,12 +16,16 @@ First-party signed kind:export plugin cdylib: the OTLP trace export sink (module
 
 ## Config
 
-Configured under the `otlp` module name.
+Configured from an `export.<name>.module: otlp` block. Its `settings:` are:
+
+- `url` (required): the OTLP/HTTP traces endpoint, e.g. `https://collector.example:4318/v1/traces`. It must be `https://`; plaintext `http://` is allowed only to a loopback collector. Userinfo in the url (`https://user:pass@collector/…`) is not sent in the url: it becomes an `Authorization: Basic` header, and every log line masks it. A url whose credential holds an unescaped `/`, `?` or `#` is refused as ambiguous; percent-encode it (`%2F`, `%3F`, `%23`).
+
+One instance per config: a second `module: otlp` export is refused, because OTLP installs the one process-global tracer subscriber.
 
 ## Build
 
 ```bash
-cargo build --release -p busbar-export-otlp-plugin
+cargo build --release -p busbar-export-otlp-plugin --features dropped-in
 ```
 
 ## Tests
