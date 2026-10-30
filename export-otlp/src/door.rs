@@ -27,10 +27,10 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
+use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::cred::Cred;
-use busbar_contract::abi::sdk::door::{abi_str, statement};
+use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
 use busbar_contract::abi::sdk::exchange::{
     exchange, Exchange, ExchangeResponse, Request, SealedField, REPLY_OVER_BOUND,
 };
@@ -92,7 +92,10 @@ busbar_contract::statement_extensions!(EXTENSIONS: [
 /// The most deliveries one instance holds in flight; past it the host sheds the batch.
 pub const MAX_INFLIGHT: u32 = 64;
 
-/// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
+/// The module name an operator writes, as the alias the registry holds beside [`NAME`].
+const REWRITES: &[Rewrite] = &[alias(ALIAS)];
+
+/// This plugin's Statement: its name and version, the `traces` stream, the alias and the collector need.
 pub const STATEMENT: Statement = Statement {
     extensions: EXTENSIONS,
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
@@ -101,6 +104,8 @@ pub const STATEMENT: Statement = Statement {
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
     // refusal of a second `module: otlp` sink (`second_instances`).
     marks: MARK_ONE_INSTANCE,
+    rewrites: REWRITES.as_ptr(),
+    rewrites_len: REWRITES.len(),
     ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
 
