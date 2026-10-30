@@ -397,15 +397,26 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
     }
 }
 
-/// A 2xx whose body passes the reply bound fails the exchange after its head; the batch was
-/// delivered, so it is no dropped batch. A non-2xx head, or a failure with no head, stays a failure.
+/// A reply whose body passes the bound fails the exchange after its head; the batch reached the
+/// collector, so a 2xx is delivered and any other status is the usual non-2xx drop with its status.
+/// A failure with no head, or any other failure, stays a failure.
 #[test]
-fn a_2xx_reply_past_the_bound_is_still_delivered() {
+fn a_reply_past_the_bound_keeps_its_head_status() {
     use super::{delivered_past_bound, REPLY_OVER_BOUND};
     let over = || Err(ConnFailure::Failed(REPLY_OVER_BOUND.to_string()));
     let ok = delivered_past_bound(over(), Some(200)).expect("delivered");
     assert_eq!((ok.status, ok.body.is_empty()), (200, true));
-    assert!(delivered_past_bound(over(), Some(503)).is_err());
+    let (otlp, run) = admitted_run("https://c.example/v1/traces");
+    let refused = delivered_past_bound(over(), Some(503)).expect("a status, not a failure");
+    let lines = captured(|| otlp.settle(&run, &Ok(refused)));
+    assert_eq!(
+        lines,
+        [(
+            tracing::Level::WARN,
+            "OTLP span export returned a non-2xx status; this batch was dropped".to_string(),
+            " endpoint=https://c.example/v1/traces status=503".to_string()
+        )]
+    );
     assert!(delivered_past_bound(over(), None).is_err());
     let reset = Err(ConnFailure::Failed("connection reset".into()));
     assert!(delivered_past_bound(reset, Some(200)).is_err());
