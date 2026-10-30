@@ -431,17 +431,15 @@ fn capped(text: &str) -> String {
 }
 
 /// A reply whose body passed [`REPLY_LIMIT`] fails the exchange ([`REPLY_OVER_BOUND`]) after its
-/// head was read. The batch was delivered all the same: when that head carried a 2xx status the
-/// answer is that status with no body (its `partial_success`, if any, is unread); any other
-/// failure, or a non-2xx head, stands as it was.
+/// head was read. The batch reached the collector all the same: with a head status, the answer is
+/// that status with no body (a 2xx is delivered, its `partial_success` unread; any other status is
+/// the usual non-2xx drop, status named). Any other failure, or one with no head, stands.
 fn delivered_past_bound(
     result: Result<ExchangeResponse, ConnFailure>,
     head_status: Option<u16>,
 ) -> Result<ExchangeResponse, ConnFailure> {
     match (&result, head_status) {
-        (Err(ConnFailure::Failed(text)), Some(status))
-            if text == REPLY_OVER_BOUND && (200..300).contains(&status) =>
-        {
+        (Err(ConnFailure::Failed(text)), Some(status)) if text == REPLY_OVER_BOUND => {
             Ok(ExchangeResponse {
                 status,
                 ..ExchangeResponse::default()
