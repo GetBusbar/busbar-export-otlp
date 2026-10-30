@@ -103,6 +103,15 @@ pub const STATEMENT: Statement = Statement {
     ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
 
+/// The catalogue codes the sink's lines carry (`declares.json`): the exporter disabled because the
+/// host refused its target, a non-2xx answer (batch dropped), a transport failure (batch dropped),
+/// a collector's partial rejection, a record skipped (not JSON, or no span identity).
+const DISABLED: &str = "BUSBAR-7140";
+const NON_2XX: &str = "BUSBAR-7141";
+const TRANSPORT_FAILURE: &str = "BUSBAR-7142";
+const PARTIAL_REJECTION: &str = "BUSBAR-7143";
+const SKIPPED_RECORD: &str = "BUSBAR-7144";
+
 /// The most of a collector's reply body this sink buffers: the `partial_success` it reads is small.
 const REPLY_LIMIT: usize = 64 * 1024;
 
@@ -266,6 +275,8 @@ impl Run {
             match (result, *admitted) {
                 (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
                     tracing::error!(
+                        diag = %DISABLED,
+                        endpoint = %shown,
                         "{}; disabling OTLP trace export",
                         scrub(&e.to_string(), secrets)
                     );
@@ -283,6 +294,7 @@ impl Run {
             Ok(reply) if (200..300).contains(&reply.status) => {
                 if let Some((rejected_spans, message)) = proto::rejected(&reply.body) {
                     tracing::warn!(
+                        diag = %PARTIAL_REJECTION,
                         endpoint = %shown,
                         rejected_spans,
                         "OTLP collector rejected part of this batch: {:?}",
@@ -291,6 +303,7 @@ impl Run {
                 }
             }
             Ok(reply) => tracing::warn!(
+                diag = %NON_2XX,
                 endpoint = %shown,
                 status = reply.status,
                 "OTLP span export returned a non-2xx status; this batch was dropped"
@@ -346,9 +359,9 @@ pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(record) => match proto::span(&record) {
                 Some(span) => spans.push(span),
-                None => tracing::warn!("OTLP span export skipped a record with no span identity"),
+                None => tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a record with no span identity"),
             },
-            Err(_) => tracing::warn!("OTLP span export skipped a line that is not JSON"),
+            Err(_) => tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a line that is not JSON"),
         }
     }
     proto::encode(spans)
@@ -453,6 +466,7 @@ fn delivered_past_bound(
 /// credential-bearing parts.
 fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
     tracing::warn!(
+        diag = %TRANSPORT_FAILURE,
         endpoint = %shown,
         error = %scrub(&error.to_string(), secrets),
         "OTLP span export failed; this batch was dropped"
@@ -508,7 +522,7 @@ pub use table::door;
 
 /// The door as the macro built it, for the contract's test support (`DoorView::of`).
 #[cfg(test)]
-pub(crate) use table::MACRO_DOOR;
+pub use table::MACRO_DOOR;
 
 #[cfg(test)]
 #[path = "door_tests.rs"]
