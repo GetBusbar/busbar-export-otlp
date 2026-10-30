@@ -97,7 +97,8 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
         [(
             tracing::Level::WARN,
             "OTLP span export failed; this batch was dropped".to_string(),
-            " endpoint=https://a.example/v1/traces error=the egress class says no".to_string()
+            " diag=BUSBAR-7142 endpoint=https://a.example/v1/traces error=the egress class says no"
+                .to_string()
         )],
         "a stale refusal is one line naming the old endpoint, with no settling line"
     );
@@ -380,7 +381,8 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
         [(
             tracing::Level::WARN,
             "OTLP collector rejected part of this batch: \"too old ***\"".to_string(),
-            " endpoint=https://***@c.example/v1/traces rejected_spans=3".to_string()
+            " diag=BUSBAR-7143 endpoint=https://***@c.example/v1/traces rejected_spans=3"
+                .to_string()
         )]
     );
     // A count alone, with no message, is still a rejection.
@@ -414,7 +416,7 @@ fn a_reply_past_the_bound_keeps_its_head_status() {
         [(
             tracing::Level::WARN,
             "OTLP span export returned a non-2xx status; this batch was dropped".to_string(),
-            " endpoint=https://c.example/v1/traces status=503".to_string()
+            " diag=BUSBAR-7141 endpoint=https://c.example/v1/traces status=503".to_string()
         )]
     );
     assert!(delivered_past_bound(over(), None).is_err());
@@ -541,4 +543,94 @@ fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
     let lines = captured(|| otlp.settle(&run, &reply(body)));
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].2.contains("rejected_spans=4"), "{lines:?}");
+}
+
+/// The disabling line and the two skipped-record lines carry their catalogue codes (7140, 7144);
+/// the disabling line names the collector. RED before: they carried no `diag` (nor the endpoint).
+#[test]
+fn the_disabling_and_skipped_record_lines_carry_their_codes() {
+    let settings = crate::OtlpSettings {
+        url: "https://u:SECRETpw@c.example/v1/traces".into(),
+    };
+    let otlp = Otlp {
+        run: RwLock::new(Otlp::start(Endpoint::of(&settings))),
+    };
+    let run = otlp.run();
+    let refusal = Err(ConnFailure::Refused("the egress class says no".into()));
+    let lines = captured(|| otlp.settle(&run, &refusal));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].0, tracing::Level::ERROR);
+    assert_eq!(
+        lines[0].2,
+        " diag=BUSBAR-7140 endpoint=https://***@c.example/v1/traces"
+    );
+    let lines = captured(|| {
+        assert_eq!(batch_body(b"not json\n{\"name\":\"no ids\"}\n"), None);
+    });
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    for (_, _, fields) in &lines {
+        assert_eq!(fields, " diag=BUSBAR-7144");
+    }
+}
+
+/// Every code the declaration states is raised on a line, and the declaration states exactly the
+/// five codes the sink raises.
+#[test]
+fn every_declared_code_is_on_a_line() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let d: serde_json::Value = serde_json::from_str(crate::DECLARES).unwrap();
+    let declared: Vec<u64> = d["diagnostics"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .map(|c| c["code"].as_u64().unwrap())
+        .collect();
+    assert_eq!(declared, vec![7140, 7141, 7142, 7143, 7144]);
+    let (otlp, run) = admitted_run("https://c.example/v1/traces");
+    let mut fields = String::new();
+    let mut take = |lines: Vec<(tracing::Level, String, String)>| {
+        for (_, _, f) in lines {
+            fields.push_str(&f);
+        }
+    };
+    take(captured(|| {
+        otlp.settle(&run, &Err(ConnFailure::Failed("reset".into())))
+    }));
+    take(captured(|| {
+        otlp.settle(
+            &run,
+            &Ok(ExchangeResponse {
+                status: 500,
+                ..ExchangeResponse::default()
+            }),
+        )
+    }));
+    take(captured(|| {
+        otlp.settle(
+            &run,
+            &Ok(ExchangeResponse {
+                status: 200,
+                body: partial_success_body(1, ""),
+                ..ExchangeResponse::default()
+            }),
+        )
+    }));
+    let fresh = Otlp {
+        run: RwLock::new(Otlp::start(Endpoint::of(&crate::OtlpSettings {
+            url: "https://c.example/v1/traces".into(),
+        }))),
+    };
+    let fresh_run = fresh.run();
+    take(captured(|| {
+        fresh.settle(&fresh_run, &Err(ConnFailure::Unarmed))
+    }));
+    take(captured(|| {
+        batch_body(b"not json\n{}\n");
+    }));
+    for code in declared {
+        assert!(
+            fields.contains(&format!("diag=BUSBAR-{code}")),
+            "BUSBAR-{code} is declared but no line carries it: {fields}"
+        );
+    }
 }
