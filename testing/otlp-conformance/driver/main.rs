@@ -5,23 +5,18 @@
 //!   driver body <batch.jsonl> <out.bin>      write the OTLP request body the sink builds
 //!   driver send <url> <batch.jsonl>          POST it with the sink's own headers and target
 //!
-//! Records that are no span are skipped, as the sink skips them. Exit 0 iff the collector answered
+//! Records that are no span are skipped, by the sink's own splitting (`door::batch_body`). Exit 0 iff the collector answered
 //! 2xx (send) or a body was built (body). The sink's `Endpoint` supplies the request target and
 //! headers, so what is sent is what the sink would send; only the host connector's socket is
 //! replaced by a plain HTTP/1.1 client.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-use busbar_export_otlp::door::Endpoint;
-use busbar_export_otlp::{proto, OtlpSettings};
+use busbar_export_otlp::door::{self, Endpoint};
+use busbar_export_otlp::OtlpSettings;
 
 fn body(batch: &[u8]) -> Vec<u8> {
-    let records: Vec<serde_json::Value> = batch
-        .split(|b| *b == b'\n')
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-        .filter(proto::is_span)
-        .collect();
-    proto::export_request(&records).expect("the batch holds no span")
+    door::batch_body(batch).expect("the batch holds no span")
 }
 
 fn main() {

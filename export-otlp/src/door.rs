@@ -308,8 +308,11 @@ impl Life for Otlp {
     }
 }
 
-/// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped.
-fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
+/// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped: the
+/// one pipeline from a `traces` batch to its request, the door's delivery and the conformance
+/// driver both (a record encodes through [`proto::span`] and [`proto::encode`], as
+/// [`proto::export_request`] does for records already parsed).
+pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
     let mut spans = Vec::new();
     for line in batch
         .split(|b| *b == b'\n')
