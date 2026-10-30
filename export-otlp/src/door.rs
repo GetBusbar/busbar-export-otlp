@@ -318,9 +318,9 @@ fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(record) => match proto::span(&record) {
                 Some(span) => spans.push(span),
-                None => tracing::debug!("OTLP span export skipped a record with no span identity"),
+                None => tracing::warn!("OTLP span export skipped a record with no span identity"),
             },
-            Err(_) => tracing::debug!("OTLP span export skipped a line that is not JSON"),
+            Err(_) => tracing::warn!("OTLP span export skipped a line that is not JSON"),
         }
     }
     proto::encode(spans)
