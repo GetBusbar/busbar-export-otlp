@@ -27,11 +27,12 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
+use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
-use busbar_contract::abi::sdk::door::{abi_str, statement};
+use busbar_contract::abi::sdk::cred::Cred;
+use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
 use busbar_contract::abi::sdk::exchange::{
-    exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
+    exchange, Exchange, ExchangeResponse, Request, SealedField, REPLY_OVER_BOUND,
 };
 use busbar_contract::abi::sdk::export::{instance_names, second_instances, tail};
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
@@ -91,7 +92,10 @@ busbar_contract::statement_extensions!(EXTENSIONS: [
 /// The most deliveries one instance holds in flight; past it the host sheds the batch.
 pub const MAX_INFLIGHT: u32 = 64;
 
-/// This plugin's Statement: its name and version, the `traces` stream, and the collector need.
+/// The module name an operator writes, as the alias the registry holds beside [`NAME`].
+const REWRITES: &[Rewrite] = &[alias(ALIAS)];
+
+/// This plugin's Statement: its name and version, the `traces` stream, the alias and the collector need.
 pub const STATEMENT: Statement = Statement {
     extensions: EXTENSIONS,
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
@@ -100,8 +104,19 @@ pub const STATEMENT: Statement = Statement {
     // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
     // refusal of a second `module: otlp` sink (`second_instances`).
     marks: MARK_ONE_INSTANCE,
+    rewrites: REWRITES.as_ptr(),
+    rewrites_len: REWRITES.len(),
     ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
 };
+
+/// The catalogue codes the sink's lines carry (`declares.json`): the exporter disabled because the
+/// host refused its target, a non-2xx answer (batch dropped), a transport failure (batch dropped),
+/// a collector's partial rejection, a record skipped (not JSON, or no span identity).
+const DISABLED: &str = "BUSBAR-7140";
+const NON_2XX: &str = "BUSBAR-7141";
+const TRANSPORT_FAILURE: &str = "BUSBAR-7142";
+const PARTIAL_REJECTION: &str = "BUSBAR-7143";
+const SKIPPED_RECORD: &str = "BUSBAR-7144";
 
 /// The most of a collector's reply body this sink buffers: the `partial_success` it reads is small.
 const REPLY_LIMIT: usize = 64 * 1024;
@@ -115,8 +130,9 @@ const AUTHORIZATION_FIELD: &[u8] = b"authorization";
 pub struct Target {
     /// The request target: the settings' path and query.
     pub path: String,
-    /// The `Authorization` the settings' userinfo became, if it carried one.
-    pub authorization: Option<String>,
+    /// The `Authorization` the settings' userinfo became, if it carried one, held as a `Cred` (it
+    /// has no getter and no `Debug`): each request carries it sealed, so the SDK frames and wipes it.
+    pub authorization: Option<Cred>,
 }
 
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
@@ -165,35 +181,51 @@ impl Endpoint {
             shown: log_target(&settings.url),
             target: Target {
                 path: request_target(&clean),
-                authorization,
+                authorization: authorization.map(|value| {
+                    // Required to go out secured when the operator's url names a secure scheme.
+                    Cred::take(&mut serde_json::Value::String(value))
+                        .unwrap_or_else(Cred::empty)
+                        .secure_for(&settings.url)
+                }),
             },
             collector: clean,
             secrets,
         }
     }
 
-    /// The request carrying `body` to this endpoint.
+    /// The request carrying `body` to this endpoint, and the sealed fields it carries beside it
+    /// ([`Exchange::request_sealed`]): the `Authorization` goes in after the plain `content-type`,
+    /// the order it has always had on the wire.
     #[must_use]
-    pub fn request(&self, body: Vec<u8>) -> Request {
-        let Target {
-            path: target,
-            authorization,
-        } = &self.target;
-        let mut fields = Vec::with_capacity(2);
-        fields.push((
-            CONTENT_TYPE_FIELD.to_vec(),
-            CONTENT_TYPE.as_bytes().to_vec(),
-        ));
-        if let Some(value) = authorization {
-            fields.push((AUTHORIZATION_FIELD.to_vec(), value.as_bytes().to_vec()));
-        }
-        Request {
+    pub fn parts(&self, body: Vec<u8>) -> (Request, Vec<SealedField>) {
+        let request = Request {
             method: METHOD.to_vec(),
-            target: target.as_bytes().to_vec(),
-            fields,
+            target: self.target.path.as_bytes().to_vec(),
+            fields: vec![(
+                CONTENT_TYPE_FIELD.to_vec(),
+                CONTENT_TYPE.as_bytes().to_vec(),
+            )],
             body,
             timeout_ms: EXPORT_TIMEOUT_MS,
-        }
+        };
+        let sealed = self
+            .target
+            .authorization
+            .iter()
+            .map(|c| (1, AUTHORIZATION_FIELD.to_vec(), c.field()))
+            .collect();
+        (request, sealed)
+    }
+}
+
+impl Endpoint {
+    /// The exchange carrying `body` to this endpoint, framed.
+    ///
+    /// # Errors
+    /// The SDK's refusal to frame the request.
+    pub fn exchange(&self, body: Vec<u8>) -> Result<Exchange, ConnFailure> {
+        let (request, sealed) = self.parts(body);
+        Exchange::request_sealed(request, sealed)
     }
 }
 
@@ -266,6 +298,8 @@ impl Run {
             match (result, *admitted) {
                 (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
                     tracing::error!(
+                        diag = %DISABLED,
+                        endpoint = %shown,
                         "{}; disabling OTLP trace export",
                         scrub(&e.to_string(), secrets)
                     );
@@ -283,6 +317,7 @@ impl Run {
             Ok(reply) if (200..300).contains(&reply.status) => {
                 if let Some((rejected_spans, message)) = proto::rejected(&reply.body) {
                     tracing::warn!(
+                        diag = %PARTIAL_REJECTION,
                         endpoint = %shown,
                         rejected_spans,
                         "OTLP collector rejected part of this batch: {:?}",
@@ -291,6 +326,7 @@ impl Run {
                 }
             }
             Ok(reply) => tracing::warn!(
+                diag = %NON_2XX,
                 endpoint = %shown,
                 status = reply.status,
                 "OTLP span export returned a non-2xx status; this batch was dropped"
@@ -346,9 +382,13 @@ pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(record) => match proto::span(&record) {
                 Some(span) => spans.push(span),
-                None => tracing::warn!("OTLP span export skipped a record with no span identity"),
+                None => {
+                    tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a record with no span identity")
+                }
             },
-            Err(_) => tracing::warn!("OTLP span export skipped a line that is not JSON"),
+            Err(_) => {
+                tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a line that is not JSON")
+            }
         }
     }
     proto::encode(spans)
@@ -383,7 +423,7 @@ impl SafeSlot for Deliver {
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
-                match Exchange::request(endpoint.request(body)) {
+                match endpoint.exchange(body) {
                     // Only the collector's `partial_success` is read from the body: a small bound.
                     Ok(state) => (state.reply_limit(REPLY_LIMIT), run),
                     Err(e) => {
@@ -453,6 +493,7 @@ fn delivered_past_bound(
 /// credential-bearing parts.
 fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
     tracing::warn!(
+        diag = %TRANSPORT_FAILURE,
         endpoint = %shown,
         error = %scrub(&error.to_string(), secrets),
         "OTLP span export failed; this batch was dropped"
@@ -504,11 +545,9 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
-
-/// The door as the macro built it, for the contract's test support (`DoorView::of`).
-#[cfg(test)]
-pub(crate) use table::MACRO_DOOR;
+/// `MACRO_DOOR` is the door as the macro built it, for the contract's test support
+/// (`DoorView::of`), public as the other exports state it.
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "door_tests.rs"]
