@@ -43,6 +43,9 @@ use crate::{
     CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME, ONE_INSTANCE,
 };
 
+/// The settings path the need's target is read from.
+pub(crate) const TARGET_FROM: &str = "settings.url";
+
 /// The one need's index in [`STATEMENT`]'s needs.
 pub const NEED: u32 = 0;
 
@@ -57,7 +60,7 @@ pub(crate) const NEEDS: &[Need] = &[Need {
     egress_class: EGRESS_LOOPBACK_ALLOWED,
     transport: abi_str("http"),
     auth: abi_str(""),
-    target_from: abi_str("settings.url"),
+    target_from: abi_str(TARGET_FROM),
     trust_from: abi_str(""),
     details: Blob::ABSENT,
     keep_response_headers: std::ptr::null(),
