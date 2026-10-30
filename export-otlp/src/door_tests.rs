@@ -492,13 +492,8 @@ fn a_batch_is_split_into_its_span_lines() {
 fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let (otlp, run) = admitted_run("https://opsuser:hunter2@c.example/v1/traces");
-    let token = run
-        .endpoint
-        .target
-        .authorization
-        .clone()
-        .and_then(|a| a.strip_prefix("Basic ").map(str::to_owned))
-        .expect("a Basic authorization");
+    assert!(run.endpoint.target.authorization.is_some());
+    let token = crate::base64(b"opsuser:hunter2");
     for echo in [format!("Basic {token}"), token.clone()] {
         let reply = Ok(ExchangeResponse {
             status: 200,
@@ -652,6 +647,13 @@ fn the_basic_authorization_rides_sealed() {
             (&b"authorization"[..], &b"<sealed>"[..]),
         ]
     );
+    // base64("us@r:p:ss"), held by the instance as a `Cred`.
+    assert!(endpoint
+        .target
+        .authorization
+        .as_ref()
+        .expect("held")
+        .verify_eq(b"Basic dXNAcjpwOnNz"));
     // No credential: no sealed field.
     let plain = Endpoint::of(&crate::OtlpSettings {
         url: "http://127.0.0.1:4318/v1/traces".into(),
