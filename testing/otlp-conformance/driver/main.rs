@@ -31,8 +31,8 @@ fn main() {
                 serde_json::from_value(serde_json::json!({ "url": args[2].as_str() })).expect("settings");
             let endpoint = Endpoint::of(&settings);
             let payload = body(&std::fs::read(&args[3]).expect("read batch"));
-            let request = endpoint.request(payload).expect("endpoint names a target");
-            let collector = endpoint.collector.expect("collector");
+            let request = endpoint.request(payload);
+            let collector = endpoint.collector;
             let authority = collector
                 .split("://")
                 .nth(1)

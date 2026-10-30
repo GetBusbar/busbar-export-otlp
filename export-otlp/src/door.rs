@@ -104,20 +104,27 @@ const METHOD: &[u8] = b"POST";
 const CONTENT_TYPE_FIELD: &[u8] = b"content-type";
 const AUTHORIZATION_FIELD: &[u8] = b"authorization";
 
+/// The request target and credential of an endpoint's exports.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The request target: the settings' path and query.
+    pub path: String,
+    /// The `Authorization` the settings' userinfo became, if it carried one.
+    pub authorization: Option<String>,
+}
+
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
 /// the collector is named as every line names it, the request target and the `Authorization` the
 /// url's userinfo became are redacted.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// The settings' URL as every line names it ([`log_target`]: userinfo, a non-OTLP path and the
     /// query masked).
     pub shown: String,
-    /// The collector the host dials — the settings' URL without its userinfo; `None` only for the
-    /// default endpoint, which names none.
-    pub collector: Option<String>,
-    /// The request target (path and query) and the `Authorization` the userinfo became; `None`
-    /// only for the default endpoint, which names none.
-    pub target: Option<(String, Option<String>)>,
+    /// The collector the host dials — the settings' URL without its userinfo.
+    pub collector: String,
+    /// What each request carries besides the body.
+    pub target: Target,
     /// The parts of the settings' URL cut from the host's text before it is logged
     /// ([`secret_parts`]).
     pub secrets: Vec<String>,
@@ -125,13 +132,13 @@ pub struct Endpoint {
 
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let target = self
-            .target
-            .as_ref()
-            .map(|(_, authorization)| ("<redacted>", authorization.as_ref().map(|_| "<redacted>")));
+        let target = (
+            "<redacted>",
+            self.target.authorization.as_ref().map(|_| "<redacted>"),
+        );
         f.debug_struct("Endpoint")
             .field("shown", &self.shown)
-            .field("collector", &self.collector.as_deref().map(log_target))
+            .field("collector", &log_target(&self.collector))
             .field("target", &target)
             .finish_non_exhaustive()
     }
@@ -144,16 +151,22 @@ impl Endpoint {
         let (clean, authorization) = split_credentials(&settings.url);
         Self {
             shown: log_target(&settings.url),
-            target: Some((request_target(&clean), authorization)),
-            collector: Some(clean),
+            target: Target {
+                path: request_target(&clean),
+                authorization,
+            },
+            collector: clean,
             secrets: secret_parts(&settings.url),
         }
     }
 
-    /// The request carrying `body` to this endpoint; `None` when it names none.
+    /// The request carrying `body` to this endpoint.
     #[must_use]
-    pub fn request(&self, body: Vec<u8>) -> Option<Request> {
-        let (target, authorization) = self.target.as_ref()?;
+    pub fn request(&self, body: Vec<u8>) -> Request {
+        let Target {
+            path: target,
+            authorization,
+        } = &self.target;
         let mut fields = Vec::with_capacity(2);
         fields.push((
             CONTENT_TYPE_FIELD.to_vec(),
@@ -162,13 +175,13 @@ impl Endpoint {
         if let Some(value) = authorization {
             fields.push((AUTHORIZATION_FIELD.to_vec(), value.as_bytes().to_vec()));
         }
-        Some(Request {
+        Request {
             method: METHOD.to_vec(),
             target: target.as_bytes().to_vec(),
             fields,
             body,
             timeout_ms: EXPORT_TIMEOUT_MS,
-        })
+        }
     }
 }
 
@@ -358,10 +371,7 @@ impl SafeSlot for Deliver {
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
-                let Some(request) = endpoint.request(body) else {
-                    return Outcome::Ready;
-                };
-                match Exchange::request(request) {
+                match Exchange::request(endpoint.request(body)) {
                     // Only the collector's `partial_success` is read from the body: a small bound.
                     Ok(state) => (state.reply_limit(REPLY_LIMIT), run),
                     Err(e) => {
@@ -376,7 +386,7 @@ impl SafeSlot for Deliver {
                 &mut host.connector(instance.ticket()),
                 &mut state,
                 NEED,
-                run.endpoint.collector.as_deref(),
+                Some(run.endpoint.collector.as_str()),
             ),
             None => Poll::Ready(Err(ConnFailure::Unarmed)),
         };
