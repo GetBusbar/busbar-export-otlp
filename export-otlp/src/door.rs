@@ -359,9 +359,13 @@ pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(record) => match proto::span(&record) {
                 Some(span) => spans.push(span),
-                None => tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a record with no span identity"),
+                None => {
+                    tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a record with no span identity")
+                }
             },
-            Err(_) => tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a line that is not JSON"),
+            Err(_) => {
+                tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a line that is not JSON")
+            }
         }
     }
     proto::encode(spans)
@@ -518,11 +522,9 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
-
-/// The door as the macro built it, for the contract's test support (`DoorView::of`).
-#[cfg(test)]
-pub use table::MACRO_DOOR;
+/// `MACRO_DOOR` is the door as the macro built it, for the contract's test support
+/// (`DoorView::of`), public as the other exports state it.
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "door_tests.rs"]
