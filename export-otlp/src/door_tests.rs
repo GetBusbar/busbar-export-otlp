@@ -327,3 +327,76 @@ fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
     assert!(text.contains("is ambiguous"), "{text}");
     assert!(!text.contains("pa/ss") && !text.contains("svc:"), "{text}");
 }
+
+/// An `ExportTraceServiceResponse` body carrying `partial_success`, encoded by the OpenTelemetry
+/// project's own types.
+fn partial_success_body(rejected_spans: i64, error_message: &str) -> Vec<u8> {
+    use opentelemetry_proto::tonic::collector::trace::v1::{
+        ExportTracePartialSuccess, ExportTraceServiceResponse,
+    };
+    use prost::Message as _;
+    ExportTraceServiceResponse {
+        partial_success: Some(ExportTracePartialSuccess {
+            rejected_spans,
+            error_message: error_message.to_string(),
+        }),
+    }
+    .encode_to_vec()
+}
+
+/// An admitted run at `url`, for the answers a 2xx carries.
+fn admitted_run(url: &str) -> (Otlp, std::sync::Arc<super::Run>) {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let settings = crate::OtlpSettings { url: url.into() };
+    let otlp = Otlp {
+        run: RwLock::new(Otlp::start(Endpoint::of(&settings))),
+    };
+    let run = otlp.run();
+    otlp.settle(
+        &run,
+        &Ok(ExchangeResponse {
+            status: 200,
+            ..ExchangeResponse::default()
+        }),
+    );
+    (otlp, run)
+}
+
+/// RED before: a 2xx whose `partial_success` rejected spans dropped them without a word. It is one
+/// warn line with the count and the collector's (scrubbed) message; an empty or undecodable 2xx
+/// body stays a success with no line.
+#[test]
+fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://u:SECRETpw@c.example/v1/traces");
+    let reply = |body: Vec<u8>| {
+        Ok(ExchangeResponse {
+            status: 200,
+            body,
+            ..ExchangeResponse::default()
+        })
+    };
+    let lines = captured(|| {
+        otlp.settle(&run, &reply(partial_success_body(3, "too old SECRETpw")));
+    });
+    assert_eq!(
+        lines,
+        [(
+            tracing::Level::WARN,
+            "OTLP collector rejected part of this batch: too old ***".to_string(),
+            " endpoint=https://***@c.example/v1/traces rejected_spans=3".to_string()
+        )]
+    );
+    // A count alone, with no message, is still a rejection.
+    let lines = captured(|| otlp.settle(&run, &reply(partial_success_body(2, ""))));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    // Nothing rejected, an empty body, and a body that is no response: silent successes.
+    for body in [
+        partial_success_body(0, ""),
+        Vec::new(),
+        b"\xff\xff not protobuf".to_vec(),
+    ] {
+        let lines = captured(|| otlp.settle(&run, &reply(body.clone())));
+        assert!(lines.is_empty(), "{body:?}: {lines:?}");
+    }
+}
