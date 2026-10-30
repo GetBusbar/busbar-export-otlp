@@ -2,11 +2,11 @@
 [package]
 name = "busbar-export-otlp"
 version = "1.6.0"
-edition = "2021"
-rust-version = "1.97"
+edition.workspace = true
+rust-version.workspace = true
 description = "The OTLP trace export sink as a kind:export plugin: encodes each batch of busbar's traces stream as an OTLP/HTTP protobuf ExportTraceServiceRequest and POSTs it to the operator's collector through the host's connector (it never dials), linked into the busbar binary or dropped into plugins/ — one crate, one door."
-license = "Apache-2.0"
-publish = false
+license.workspace = true
+publish.workspace = true 
 
 [lib]
 # rlib only: the logic and its door. A build that LINKS this crate registers `door::door` as its row

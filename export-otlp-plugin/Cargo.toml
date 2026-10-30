@@ -2,11 +2,11 @@
 [package]
 name = "busbar-export-otlp-plugin"
 version = "1.6.0"
-publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
-edition = "2021"
-rust-version = "1.97"
+publish.workspace = true # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
+edition.workspace = true
+rust-version.workspace = true
 description = "First-party signed kind:export plugin cdylib: the OTLP trace export sink (`module: otlp`), packaged as a droppable busbar plugin. Drop the signed tarball into `plugins/` and name it from an `export.<name>.module: otlp` block."
-license = "Apache-2.0"
+license.workspace = true
 
 [lib]
 # cdylib: the DROPPED-IN door, exporting `busbar_plugin_door` (a signed tarball in `plugins/`).
