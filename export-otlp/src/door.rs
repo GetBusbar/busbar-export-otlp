@@ -155,6 +155,12 @@ impl Endpoint {
     #[must_use]
     pub fn of(settings: &OtlpSettings) -> Self {
         let (clean, authorization) = split_credentials(&settings.url);
+        let mut secrets = secret_parts(&settings.url);
+        // A collector may echo the request's `Authorization` back: the header value and its token.
+        if let Some(value) = &authorization {
+            secrets.extend(value.strip_prefix("Basic ").map(str::to_owned));
+            secrets.push(value.clone());
+        }
         Self {
             shown: log_target(&settings.url),
             target: Target {
@@ -162,7 +168,7 @@ impl Endpoint {
                 authorization,
             },
             collector: clean,
-            secrets: secret_parts(&settings.url),
+            secrets,
         }
     }
 
@@ -279,8 +285,8 @@ impl Run {
                     tracing::warn!(
                         endpoint = %shown,
                         rejected_spans,
-                        "OTLP collector rejected part of this batch: {}",
-                        scrub(&message, secrets)
+                        "OTLP collector rejected part of this batch: {:?}",
+                        capped(&scrub(&message, secrets))
                     );
                 }
             }
@@ -410,6 +416,17 @@ impl SafeSlot for Deliver {
                 Outcome::Ready
             }
         }
+    }
+}
+
+/// The most characters of a collector's message one line carries.
+const MESSAGE_CAP: usize = 256;
+
+/// `text` cut to [`MESSAGE_CAP`] characters, then `…`.
+fn capped(text: &str) -> String {
+    match text.char_indices().nth(MESSAGE_CAP) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
     }
 }
 
