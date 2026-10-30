@@ -102,6 +102,33 @@ pub(crate) struct Span {
     status: Option<Status>,
 }
 
+/// `ExportTraceServiceResponse` (collector/trace/v1): a collector's 2xx answer.
+#[derive(Clone, PartialEq, prost::Message)]
+struct ExportTraceServiceResponse {
+    #[prost(message, optional, tag = "1")]
+    partial_success: Option<ExportTracePartialSuccess>,
+}
+
+/// `ExportTracePartialSuccess` (collector/trace/v1).
+#[derive(Clone, PartialEq, prost::Message)]
+struct ExportTracePartialSuccess {
+    #[prost(int64, tag = "1")]
+    rejected_spans: i64,
+    #[prost(string, tag = "2")]
+    error_message: String,
+}
+
+/// What a collector's 2xx body says it rejected: `Some((rejected_spans, error_message))` when its
+/// `partial_success` rejects spans or carries a message, `None` for an empty body, a body that is
+/// no `ExportTraceServiceResponse`, or a fully accepted batch.
+pub fn rejected(body: &[u8]) -> Option<(i64, String)> {
+    let partial = ExportTraceServiceResponse::decode(body)
+        .ok()?
+        .partial_success?;
+    (partial.rejected_spans > 0 || !partial.error_message.is_empty())
+        .then_some((partial.rejected_spans, partial.error_message))
+}
+
 /// `Span.Event` (trace/v1).
 #[derive(Clone, PartialEq, prost::Message)]
 struct Event {

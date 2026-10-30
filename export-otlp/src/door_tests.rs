@@ -400,3 +400,17 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
         assert!(lines.is_empty(), "{body:?}: {lines:?}");
     }
 }
+
+/// A 2xx whose body passes the reply bound fails the exchange after its head; the batch was
+/// delivered, so it is no dropped batch. A non-2xx head, or a failure with no head, stays a failure.
+#[test]
+fn a_2xx_reply_past_the_bound_is_still_delivered() {
+    use super::{delivered_past_bound, REPLY_OVER_BOUND};
+    let over = || Err(ConnFailure::Failed(REPLY_OVER_BOUND.to_string()));
+    let ok = delivered_past_bound(over(), Some(200)).expect("delivered");
+    assert_eq!((ok.status, ok.body.is_empty()), (200, true));
+    assert!(delivered_past_bound(over(), Some(503)).is_err());
+    assert!(delivered_past_bound(over(), None).is_err());
+    let reset = Err(ConnFailure::Failed("connection reset".into()));
+    assert!(delivered_past_bound(reset, Some(200)).is_err());
+}

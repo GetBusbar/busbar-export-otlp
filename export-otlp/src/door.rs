@@ -30,7 +30,9 @@ use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::exchange::{
+    exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
+};
 use busbar_contract::abi::sdk::export::{instance_names, second_instances, tail};
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
 use busbar_contract::abi::sdk::life::{settings_as, Held, Life, Refreshed, Refusal};
@@ -94,6 +96,9 @@ pub const STATEMENT: Statement = Statement {
     marks: MARK_ONE_INSTANCE,
     ..statement(NAME, env!("CARGO_PKG_VERSION"), 64)
 };
+
+/// The most of a collector's reply body this sink buffers: the `partial_success` it reads is small.
+const REPLY_LIMIT: usize = 64 * 1024;
 
 const METHOD: &[u8] = b"POST";
 const CONTENT_TYPE_FIELD: &[u8] = b"content-type";
@@ -250,7 +255,16 @@ impl Run {
             }
         }
         match result {
-            Ok(reply) if (200..300).contains(&reply.status) => {}
+            Ok(reply) if (200..300).contains(&reply.status) => {
+                if let Some((rejected_spans, message)) = proto::rejected(&reply.body) {
+                    tracing::warn!(
+                        endpoint = %shown,
+                        rejected_spans,
+                        "OTLP collector rejected part of this batch: {}",
+                        scrub(&message, secrets)
+                    );
+                }
+            }
             Ok(reply) => tracing::warn!(
                 endpoint = %shown,
                 status = reply.status,
@@ -345,7 +359,8 @@ impl SafeSlot for Deliver {
                     return Outcome::Ready;
                 };
                 match Exchange::request(request) {
-                    Ok(state) => (state, run),
+                    // Only the collector's `partial_success` is read from the body: a small bound.
+                    Ok(state) => (state.reply_limit(REPLY_LIMIT), run),
                     Err(e) => {
                         dropped(&endpoint.shown, &endpoint.secrets, &e);
                         return Outcome::Ready;
@@ -371,10 +386,32 @@ impl SafeSlot for Deliver {
                 Outcome::Pending
             }
             Poll::Ready(result) => {
+                let result = delivered_past_bound(result, state.head_status());
                 held.life().settle(&run, &result);
                 Outcome::Ready
             }
         }
+    }
+}
+
+/// A reply whose body passed [`REPLY_LIMIT`] fails the exchange ([`REPLY_OVER_BOUND`]) after its
+/// head was read. The batch was delivered all the same: when that head carried a 2xx status the
+/// answer is that status with no body (its `partial_success`, if any, is unread); any other
+/// failure, or a non-2xx head, stands as it was.
+fn delivered_past_bound(
+    result: Result<ExchangeResponse, ConnFailure>,
+    head_status: Option<u16>,
+) -> Result<ExchangeResponse, ConnFailure> {
+    match (&result, head_status) {
+        (Err(ConnFailure::Failed(text)), Some(status))
+            if text == REPLY_OVER_BOUND && (200..300).contains(&status) =>
+        {
+            Ok(ExchangeResponse {
+                status,
+                ..ExchangeResponse::default()
+            })
+        }
+        _ => result,
     }
 }
 
