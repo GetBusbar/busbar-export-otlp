@@ -472,3 +472,62 @@ fn a_batch_is_split_into_its_span_lines() {
     assert_eq!(batch_body(b""), None);
     assert_eq!(batch_body(b"\n\r\n  \n"), None);
 }
+
+/// RED before: the collector's `partial_success` message was scrubbed with the url's parts alone, so
+/// a collector echoing the request's `Authorization: Basic <token>` logged a reversible credential.
+#[test]
+fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://opsuser:hunter2@c.example/v1/traces");
+    let token = run
+        .endpoint
+        .target
+        .authorization
+        .clone()
+        .and_then(|a| a.strip_prefix("Basic ").map(str::to_owned))
+        .expect("a Basic authorization");
+    for echo in [format!("Basic {token}"), token.clone()] {
+        let reply = Ok(ExchangeResponse {
+            status: 200,
+            body: partial_success_body(1, &format!("bad header authorization: {echo}")),
+            ..ExchangeResponse::default()
+        });
+        let lines = captured(|| otlp.settle(&run, &reply));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let text = format!("{lines:?}");
+        assert!(!text.contains(&token), "the token was logged: {text}");
+    }
+}
+
+/// RED before: the collector's message was printed raw and whole (a newline forged a line, a long
+/// one filled the log) and a message that is not UTF-8 made the whole answer undecodable, so the
+/// rejected count was lost. The message is logged Debug-quoted and capped at 256 characters, and
+/// the count is reported whatever the message bytes.
+#[test]
+fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://c.example/v1/traces");
+    let reply = |body: Vec<u8>| {
+        Ok(ExchangeResponse {
+            status: 200,
+            body,
+            ..ExchangeResponse::default()
+        })
+    };
+    let long = format!("a\nINJECTED{}", "x".repeat(400));
+    let lines = captured(|| otlp.settle(&run, &reply(partial_success_body(1, &long))));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let message = &lines[0].1;
+    assert!(!message.contains('\n'), "{message:?}");
+    assert!(message.contains("a\\nINJECTED"), "{message:?}");
+    assert!(message.ends_with("…\""), "{message:?}");
+    assert!(message.chars().count() < 256 + 80, "{message:?}");
+
+    // `PartialSuccess { rejected_spans: 4, error_message: [0xff, 'a'] }`, by hand.
+    let inner = [0x08, 0x04, 0x12, 0x02, 0xff, b'a'];
+    let mut body = vec![0x0a, inner.len() as u8];
+    body.extend_from_slice(&inner);
+    let lines = captured(|| otlp.settle(&run, &reply(body)));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].2.contains("rejected_spans=4"), "{lines:?}");
+}
