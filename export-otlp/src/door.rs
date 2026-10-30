@@ -206,6 +206,16 @@ impl Endpoint {
     }
 }
 
+impl Endpoint {
+    /// The exchange carrying `body` to this endpoint, framed.
+    ///
+    /// # Errors
+    /// The SDK's refusal to frame the request.
+    pub fn exchange(&self, body: Vec<u8>) -> Result<Exchange, ConnFailure> {
+        Exchange::request(self.request(body))
+    }
+}
+
 /// One run of the sink: an endpoint and whether the host's first answer admitted it. A refresh
 /// starts a new one, so an answer for the endpoint it replaced cannot settle it.
 #[derive(Debug)]
@@ -400,7 +410,7 @@ impl SafeSlot for Deliver {
                 let Some(body) = batch_body(input.field(|i| &i.batch).bytes()) else {
                     return Outcome::Ready;
                 };
-                match Exchange::request(endpoint.request(body)) {
+                match endpoint.exchange(body) {
                     // Only the collector's `partial_success` is read from the body: a small bound.
                     Ok(state) => (state.reply_limit(REPLY_LIMIT), run),
                     Err(e) => {
