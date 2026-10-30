@@ -379,7 +379,7 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
         lines,
         [(
             tracing::Level::WARN,
-            "OTLP collector rejected part of this batch: too old ***".to_string(),
+            "OTLP collector rejected part of this batch: \"too old ***\"".to_string(),
             " endpoint=https://***@c.example/v1/traces rejected_spans=3".to_string()
         )]
     );

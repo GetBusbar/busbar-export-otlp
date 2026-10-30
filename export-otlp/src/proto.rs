@@ -114,19 +114,24 @@ struct ExportTraceServiceResponse {
 struct ExportTracePartialSuccess {
     #[prost(int64, tag = "1")]
     rejected_spans: i64,
-    #[prost(string, tag = "2")]
-    error_message: String,
+    /// Bytes on the wire as a string is: a message that is not UTF-8 must not lose the count.
+    #[prost(bytes = "vec", tag = "2")]
+    error_message: Vec<u8>,
 }
 
 /// What a collector's 2xx body says it rejected: `Some((rejected_spans, error_message))` when its
-/// `partial_success` rejects spans or carries a message, `None` for an empty body, a body that is
-/// no `ExportTraceServiceResponse`, or a fully accepted batch.
+/// `partial_success` rejects spans or carries a message (read lossily as text), `None` for an empty
+/// body, a body that is no `ExportTraceServiceResponse`, or a fully accepted batch.
 pub fn rejected(body: &[u8]) -> Option<(i64, String)> {
     let partial = ExportTraceServiceResponse::decode(body)
         .ok()?
         .partial_success?;
-    (partial.rejected_spans > 0 || !partial.error_message.is_empty())
-        .then_some((partial.rejected_spans, partial.error_message))
+    (partial.rejected_spans > 0 || !partial.error_message.is_empty()).then(|| {
+        (
+            partial.rejected_spans,
+            String::from_utf8_lossy(&partial.error_message).into_owned(),
+        )
+    })
 }
 
 /// `Span.Event` (trace/v1).
