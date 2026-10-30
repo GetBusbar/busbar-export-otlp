@@ -414,3 +414,17 @@ fn a_2xx_reply_past_the_bound_is_still_delivered() {
     let reset = Err(ConnFailure::Failed("connection reset".into()));
     assert!(delivered_past_bound(reset, Some(200)).is_err());
 }
+
+/// RED before: the two skipped-line notices were debug, so at the default level a dropped line said
+/// nothing. A skipped line is a warn.
+#[test]
+fn a_skipped_line_is_a_warn_line() {
+    let lines = captured(|| {
+        assert_eq!(batch_body(b"not json\n{\"name\":\"no ids\"}\n"), None);
+    });
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines.iter().all(|(level, _, _)| *level == tracing::Level::WARN),
+        "{lines:?}"
+    );
+}
