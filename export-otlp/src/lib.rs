@@ -133,11 +133,20 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
 /// lines. The refusal shows the url with everything before its last `@` cut, never the credential.
-/// A url that does not parse, or has no `@` after its host, is not ambiguous here. The words are
-/// the SDK's (`sdk::url::ambiguous_url`); this parser decides what the path is.
+/// A url that does not parse is read the same way by hand: the text after `://`, from its first
+/// `/`, `?` or `#`, is what a parser would take for the path (`https://svc:pa/ss@collector/…`
+/// fails on the port `pa`, and its credential would silently be dropped). A url with no `@` after
+/// its host is not ambiguous here. The words are the SDK's (`sdk::url::ambiguous_url`); this
+/// parser decides what the path is.
 pub fn ambiguous_url(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..])
+    match url::Url::parse(url) {
+        Ok(parsed) => sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..]),
+        Err(_) => {
+            let (_, rest) = url.split_once("://")?;
+            let tail = &rest[rest.find(['/', '?', '#'])?..];
+            sdk_url::ambiguous_url(url, tail)
+        }
+    }
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
