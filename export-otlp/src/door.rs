@@ -73,12 +73,12 @@ const STREAMS: &[u8] = &[ExportStream::Traces as u8];
 
 const TAIL: Tail = tail(STREAMS, &[]);
 
-/// THE REFERENCE-CAPABLE, NOT-SECRET SETTINGS FIELDS (busbar lead ruling item 7a), stated in the
-/// Statement's extensions under the contract's `EXT_REFERENCE_FIELDS` key: a `{env:}`/`{file:}`/
-/// `{module:}` reference written at `url` is resolved by the kernel IN PLACE to its string (a 1.5.5
-/// config's `url: {env: VAR}` keeps booting), and a literal url passes as written (never refused
-/// as a secret literal). The value is not a secret: it is never lent. The export host lends nothing; the sink
-/// receives the resolved string.
+// THE REFERENCE-CAPABLE, NOT-SECRET SETTINGS FIELDS (busbar lead ruling item 7a), stated in the
+// Statement's extensions under the contract's `EXT_REFERENCE_FIELDS` key: a `{env:}`/`{file:}`/
+// `{module:}` reference written at `url` is resolved by the kernel IN PLACE to its string (a 1.5.5
+// config's `url: {env: VAR}` keeps booting), and a literal url passes as written (never refused
+// as a secret literal). The value is not a secret: it is never lent. The export host lends
+// nothing; the sink receives the resolved string. (A plain comment: the macro takes no doc.)
 busbar_contract::statement_extensions!(EXTENSIONS: [
     (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
 ]);
