@@ -302,16 +302,13 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
         "https://***@collector.example:4318/v1/traces"
     );
     // The collector the host dials carries no userinfo: the credential is only the header's.
-    assert_eq!(
-        endpoint.collector.as_deref(),
-        Some("https://collector.example:4318/v1/traces")
-    );
+    assert_eq!(endpoint.collector, "https://collector.example:4318/v1/traces");
     let body = proto::export_request([&json!({"trace_id": "0000000000000001",
         "span_id": "0000000000000002", "name": "n", "start": 1, "duration_us": 1})])
     .expect("a span");
     assert_eq!(
         endpoint.request(body.clone()),
-        Some(Request {
+        Request {
             method: b"POST".to_vec(),
             target: b"/v1/traces".to_vec(),
             fields: vec![
@@ -321,7 +318,7 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
             ],
             body,
             timeout_ms: 10_000,
-        })
+        }
     );
 }
 
@@ -505,7 +502,7 @@ fn no_collector_credential_renders_through_debug() {
     let settings = settings_as::<OtlpSettings>(raw).expect("parses");
     let endpoint = crate::door::Endpoint::of(&settings);
     assert!(
-        endpoint.target.as_ref().is_some_and(|(_, a)| a.is_some()),
+        endpoint.target.authorization.is_some(),
         "the userinfo became an Authorization"
     );
     for text in [

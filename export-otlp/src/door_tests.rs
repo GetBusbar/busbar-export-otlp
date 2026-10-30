@@ -82,10 +82,7 @@ fn a_line_that_is_not_json_is_logged_as_not_json() {
 /// nor the "OTLP tracing enabled" line, and the dropped-export line names the OLD endpoint.
 #[test]
 fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
-    let at = |url: &str| Endpoint {
-        shown: url.into(),
-        ..Endpoint::default()
-    };
+    let at = |url: &str| Endpoint::of(&crate::OtlpSettings { url: url.into() });
     let otlp = Otlp {
         run: RwLock::new(Otlp::start(at("https://a.example/v1/traces"))),
     };
@@ -185,10 +182,9 @@ fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
 fn a_dropped_export_is_a_warn_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let otlp = Otlp {
-        run: RwLock::new(Otlp::start(Endpoint {
-            shown: "https://c.example/v1/traces".into(),
-            ..Endpoint::default()
-        })),
+        run: RwLock::new(Otlp::start(Endpoint::of(&crate::OtlpSettings {
+            url: "https://c.example/v1/traces".into(),
+        }))),
     };
     let run = otlp.run();
     // The first answer settles the run (admitted); the next two are drops.
