@@ -29,9 +29,10 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome, BLOB_JSON};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Statement, MARK_ONE_INSTANCE};
 use busbar_contract::abi::sdk::conn::ConnFailure;
+use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::{
-    exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
+    exchange, Exchange, ExchangeResponse, Request, SealedField, REPLY_OVER_BOUND,
 };
 use busbar_contract::abi::sdk::export::{instance_names, second_instances, tail};
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
@@ -124,8 +125,9 @@ const AUTHORIZATION_FIELD: &[u8] = b"authorization";
 pub struct Target {
     /// The request target: the settings' path and query.
     pub path: String,
-    /// The `Authorization` the settings' userinfo became, if it carried one.
-    pub authorization: Option<String>,
+    /// The `Authorization` the settings' userinfo became, if it carried one, held as a `Cred` (it
+    /// has no getter and no `Debug`): each request carries it sealed, so the SDK frames and wipes it.
+    pub authorization: Option<Cred>,
 }
 
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
@@ -174,35 +176,40 @@ impl Endpoint {
             shown: log_target(&settings.url),
             target: Target {
                 path: request_target(&clean),
-                authorization,
+                authorization: authorization.map(|value| {
+                    // Required to go out secured when the operator's url names a secure scheme.
+                    Cred::take(&mut serde_json::Value::String(value))
+                        .unwrap_or_else(Cred::empty)
+                        .secure_for(&settings.url)
+                }),
             },
             collector: clean,
             secrets,
         }
     }
 
-    /// The request carrying `body` to this endpoint.
+    /// The request carrying `body` to this endpoint, and the sealed fields it carries beside it
+    /// ([`Exchange::request_sealed`]): the `Authorization` goes in after the plain `content-type`,
+    /// the order it has always had on the wire.
     #[must_use]
-    pub fn request(&self, body: Vec<u8>) -> Request {
-        let Target {
-            path: target,
-            authorization,
-        } = &self.target;
-        let mut fields = Vec::with_capacity(2);
-        fields.push((
-            CONTENT_TYPE_FIELD.to_vec(),
-            CONTENT_TYPE.as_bytes().to_vec(),
-        ));
-        if let Some(value) = authorization {
-            fields.push((AUTHORIZATION_FIELD.to_vec(), value.as_bytes().to_vec()));
-        }
-        Request {
+    pub fn parts(&self, body: Vec<u8>) -> (Request, Vec<SealedField>) {
+        let request = Request {
             method: METHOD.to_vec(),
-            target: target.as_bytes().to_vec(),
-            fields,
+            target: self.target.path.as_bytes().to_vec(),
+            fields: vec![(
+                CONTENT_TYPE_FIELD.to_vec(),
+                CONTENT_TYPE.as_bytes().to_vec(),
+            )],
             body,
             timeout_ms: EXPORT_TIMEOUT_MS,
-        }
+        };
+        let sealed = self
+            .target
+            .authorization
+            .iter()
+            .map(|c| (1, AUTHORIZATION_FIELD.to_vec(), c.field()))
+            .collect();
+        (request, sealed)
     }
 }
 
@@ -212,7 +219,8 @@ impl Endpoint {
     /// # Errors
     /// The SDK's refusal to frame the request.
     pub fn exchange(&self, body: Vec<u8>) -> Result<Exchange, ConnFailure> {
-        Exchange::request(self.request(body))
+        let (request, sealed) = self.parts(body);
+        Exchange::request_sealed(request, sealed)
     }
 }
 

@@ -309,20 +309,30 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
     let body = proto::export_request([&json!({"trace_id": "0000000000000001",
         "span_id": "0000000000000002", "name": "n", "start": 1, "duration_us": 1})])
     .expect("a span");
+    let (request, sealed) = endpoint.parts(body.clone());
     assert_eq!(
-        endpoint.request(body.clone()),
+        request,
         Request {
             method: b"POST".to_vec(),
             target: b"/v1/traces".to_vec(),
-            fields: vec![
-                (b"content-type".to_vec(), b"application/x-protobuf".to_vec()),
-                // base64("us@r:p:ss")
-                (b"authorization".to_vec(), b"Basic dXNAcjpwOnNz".to_vec()),
-            ],
+            // The `Authorization` rides sealed, after `content-type`.
+            fields: vec![(b"content-type".to_vec(), b"application/x-protobuf".to_vec())],
             body,
             timeout_ms: 10_000,
         }
     );
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(
+        (sealed[0].0, sealed[0].1.as_slice()),
+        (1, &b"authorization"[..])
+    );
+    // base64("us@r:p:ss"), held by the instance as a `Cred`.
+    assert!(endpoint
+        .target
+        .authorization
+        .as_ref()
+        .expect("held")
+        .verify_eq(b"Basic dXNAcjpwOnNz"));
 }
 
 /// The request target is the endpoint's path and query.
