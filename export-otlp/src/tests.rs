@@ -302,7 +302,10 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
         "https://***@collector.example:4318/v1/traces"
     );
     // The collector the host dials carries no userinfo: the credential is only the header's.
-    assert_eq!(endpoint.collector, "https://collector.example:4318/v1/traces");
+    assert_eq!(
+        endpoint.collector,
+        "https://collector.example:4318/v1/traces"
+    );
     let body = proto::export_request([&json!({"trace_id": "0000000000000001",
         "span_id": "0000000000000002", "name": "n", "start": 1, "duration_us": 1})])
     .expect("a span");
@@ -485,11 +488,13 @@ fn the_statement_marks_one_instance() {
 #[test]
 fn the_need_is_pinned_to_the_url_setting() {
     assert_eq!(door::NEEDS.len(), 1);
-    assert_eq!(
-        door::NEEDS[0].target_from.len,
-        "settings.url".len(),
-        "the collector need names no configured target"
-    );
+    // The library forbids `unsafe`, so the need's string is not read here: the need is built from
+    // `TARGET_FROM` (same pointer, same length) and that is the setting's name. The plugin crate's
+    // conformance test reads the Statement's bytes through the door.
+    let target = door::NEEDS[0].target_from;
+    assert_eq!(door::TARGET_FROM, "settings.url");
+    assert_eq!(target.len, door::TARGET_FROM.len());
+    assert!(!target.ptr.is_null());
 }
 
 /// NO COLLECTOR CREDENTIAL RENDERS THROUGH `Debug` (Q128 export-otlp LOW, reader r82 on ba8cf38):
@@ -866,4 +871,49 @@ fn a_null_attribute_is_omitted_and_a_null_array_item_is_an_empty_any_value() {
     assert_eq!(array.values[0].value, Some(any_value::Value::IntValue(1)));
     assert_eq!(array.values[1].value, None);
     assert!(span.events[0].attributes.is_empty(), "{:?}", span.events);
+}
+
+/// T2: `log_target`'s fall-through branches mask the credential: text with no `://` is
+/// all masked, and a url with no host keeps only its scheme.
+#[test]
+fn log_target_masks_a_credential_in_its_fall_through_branches() {
+    const KEY: &str = "CANARYfall7";
+    // Not a URL at all (no `://`, and no scheme the parser accepts): nothing of it is shown.
+    for text in [KEY.to_string(), format!("//user:{KEY}@host/v1/traces")] {
+        let shown = log_target(&text);
+        assert!(!shown.contains(KEY), "{text}: {shown}");
+        assert_eq!(shown, "***", "{text}");
+    }
+    // A URL the parser takes but that has no host: scheme only.
+    for text in [
+        format!("data:text/plain,{KEY}"),
+        format!("mailto:ops:{KEY}@x"),
+    ] {
+        assert!(url::Url::parse(&text).is_ok(), "{text} parses");
+        let shown = log_target(&text);
+        assert!(!shown.contains(KEY), "{text}: {shown}");
+        assert!(shown.ends_with(":***"), "{text}: {shown}");
+    }
+    // An unparsable url with a `://`: userinfo cut, path masked.
+    let shown = log_target(&format!("https://user:{KEY}/x@host:99999/p/{KEY}"));
+    assert!(!shown.contains(KEY), "{shown}");
+}
+
+/// T2: a credential written percent-encoded (`p%40ss`) is scrubbed from a host failure text that
+/// quotes it encoded, decoded, or both.
+#[test]
+fn a_percent_encoded_credential_is_scrubbed_in_both_forms() {
+    let url = "https://opsuser:CANARY%40pw9@collector.example/v1/traces";
+    let parts = secret_parts(url);
+    for text in [
+        "error sending request for url (https://opsuser:CANARY%40pw9@collector.example/v1/traces)",
+        "bad credential CANARY@pw9 for the collector",
+        "bad credential CANARY%40pw9 for the collector",
+    ] {
+        let out = scrub(text, &parts);
+        assert!(
+            !out.contains("CANARY") && !out.contains("pw9"),
+            "{text} -> {out}"
+        );
+    }
 }
