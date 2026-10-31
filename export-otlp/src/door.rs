@@ -111,12 +111,14 @@ pub const STATEMENT: Statement = Statement {
 
 /// The catalogue codes the sink's lines carry (`declares.json`): the exporter disabled because the
 /// host refused its target, a non-2xx answer (batch dropped), a transport failure (batch dropped),
-/// a collector's partial rejection, a record skipped (not JSON, or no span identity).
+/// a collector's partial rejection, a record skipped (not JSON, or no span identity), a collector's
+/// warning on an accepted batch (`partial_success` with a message and no rejected span).
 const DISABLED: &str = "BUSBAR-7140";
 const NON_2XX: &str = "BUSBAR-7141";
 const TRANSPORT_FAILURE: &str = "BUSBAR-7142";
 const PARTIAL_REJECTION: &str = "BUSBAR-7143";
 const SKIPPED_RECORD: &str = "BUSBAR-7144";
+const PARTIAL_WARNING: &str = "BUSBAR-7145";
 
 /// The most of a collector's reply body this sink buffers: the `partial_success` it reads is small.
 const REPLY_LIMIT: usize = 64 * 1024;
@@ -316,13 +318,21 @@ impl Run {
         match result {
             Ok(reply) if (200..300).contains(&reply.status) => {
                 if let Some((rejected_spans, message)) = proto::rejected(&reply.body) {
-                    tracing::warn!(
-                        diag = %PARTIAL_REJECTION,
-                        endpoint = %shown,
-                        rejected_spans,
-                        "OTLP collector rejected part of this batch: {:?}",
-                        capped(&scrub(&message, secrets))
-                    );
+                    let message = capped(&scrub(&message, secrets));
+                    if rejected_spans > 0 {
+                        tracing::warn!(
+                            diag = %PARTIAL_REJECTION,
+                            endpoint = %shown,
+                            rejected_spans,
+                            "OTLP collector rejected part of this batch: {message:?}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            diag = %PARTIAL_WARNING,
+                            endpoint = %shown,
+                            "OTLP collector warned about this batch: {message:?}"
+                        );
+                    }
                 }
             }
             Ok(reply) => tracing::warn!(
