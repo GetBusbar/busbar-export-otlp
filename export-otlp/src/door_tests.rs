@@ -797,7 +797,10 @@ fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
 #[test]
 fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
     use busbar_contract::abi::sdk::life::Life;
-    for url in ["admin:secret@collector/x", "ftp:svc/tok@collector/x?k=SECRET"] {
+    for url in [
+        "admin:secret@collector/x",
+        "ftp:svc/tok@collector/x?k=SECRET",
+    ] {
         let settings = serde_json::json!({ "url": url }).to_string();
         let text = Otlp::validate(settings.as_bytes())
             .expect_err(url)

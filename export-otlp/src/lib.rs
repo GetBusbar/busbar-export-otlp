@@ -127,15 +127,14 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
     sdk_url::scrub(text, parts.to_vec(), false)
 }
 
-/// What a line shows of url text that does not parse: `<scheme>:***` when it opens with a scheme,
-/// else `***`. Nothing after the scheme is shown: without a parse there is no telling credential
+/// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
+/// `https`, else `***` (any other word before a `:` may be a credential). Nothing after the scheme is shown: without a parse there is no telling credential
 /// from host.
 fn unparsed_target(url: &str) -> String {
-    let scheme = url.split_once(':').map(|(s, _)| s).filter(|s| {
-        s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    });
+    let scheme = url
+        .split_once(':')
+        .map(|(s, _)| s)
+        .filter(|s| s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https"));
     scheme.map_or_else(|| "***".to_string(), |s| format!("{s}:***"))
 }
 
