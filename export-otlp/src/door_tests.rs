@@ -705,3 +705,42 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
         );
     }
 }
+
+/// RED before (HX-SLASHLESS): a url written without its slashes, or one the parser rejects, was
+/// echoed (and its `@` ignored) by helpers that need `://`. Any url text that does not parse and
+/// holds an `@` is refused as ambiguous, and no refusal, shown target or line holds a part of it.
+#[test]
+fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
+    use busbar_contract::abi::sdk::life::Life;
+    for (url, secrets) in [
+        ("https:user:pass@host/x?k=SECRET", &["user", "pass", "SECRET"][..]),
+        ("https:svc-token/abc@host/x", &["svc-token", "abc"][..]),
+        ("https:svc:pa/ss@host/x", &["svc", "pa/ss", "pa", "ss"][..]),
+        (
+            "https://h/hook?to=ops@corp.com&key=SECRET",
+            &["ops", "corp", "SECRET"][..],
+        ),
+        ("https://svc:pa/ss@host/x", &["svc", "pa/ss"][..]),
+        ("https://bad host:99999/x@y?k=SECRET", &["SECRET", "bad host"][..]),
+    ] {
+        let settings = serde_json::json!({ "url": url }).to_string();
+        let parses = url::Url::parse(url).is_ok();
+        let verdict = Otlp::validate(settings.as_bytes());
+        if let Err(refusal) = &verdict {
+            let text = refusal.text().expect("a refusal says why");
+            for s in secrets {
+                assert!(!text.contains(s), "{url}: `{s}` in {text}");
+            }
+        }
+        if !parses {
+            let refusal = verdict.expect_err(url);
+            let text = refusal.text().expect("a refusal says why");
+            assert!(text.contains("is ambiguous"), "{url}: {text}");
+            assert!(text.contains("url `https:***` is ambiguous"), "{url}: {text}");
+        }
+        let shown = Endpoint::of(&crate::OtlpSettings { url: url.into() }).shown;
+        for s in secrets {
+            assert!(!shown.contains(s), "{url}: `{s}` in shown {shown}");
+        }
+    }
+}
