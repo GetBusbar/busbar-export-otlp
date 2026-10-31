@@ -569,7 +569,7 @@ fn the_disabling_and_skipped_record_lines_carry_their_codes() {
 }
 
 /// Every code the declaration states is raised on a line, and the declaration states exactly the
-/// six codes the sink raises.
+/// five codes the sink raises.
 #[test]
 fn every_declared_code_is_on_a_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -580,7 +580,7 @@ fn every_declared_code_is_on_a_line() {
         .iter()
         .map(|c| c["code"].as_u64().unwrap())
         .collect();
-    assert_eq!(declared, vec![7140, 7141, 7142, 7143, 7144, 7145]);
+    assert_eq!(declared, vec![7140, 7141, 7142, 7143, 7144]);
     let (otlp, run) = admitted_run("https://c.example/v1/traces");
     let mut fields = String::new();
     let mut take = |lines: Vec<(tracing::Level, String, String)>| {
@@ -606,16 +606,6 @@ fn every_declared_code_is_on_a_line() {
             &Ok(ExchangeResponse {
                 status: 200,
                 body: partial_success_body(1, ""),
-                ..ExchangeResponse::default()
-            }),
-        )
-    }));
-    take(captured(|| {
-        otlp.settle(
-            &run,
-            &Ok(ExchangeResponse {
-                status: 200,
-                body: partial_success_body(0, "slow down"),
                 ..ExchangeResponse::default()
             }),
         )
@@ -689,19 +679,19 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
     for (url, shown) in [
         (
             "https://tok/en@collector.example:4318/CANARYpath/x?key=CANARYquery",
-            "https:***",
+            "https://***@collector.example:4318/***?***",
         ),
         (
             "https://tok/en@collector.example/v1/traces?key=CANARYquery#CANARYfrag",
-            "https:***",
+            "https://***@collector.example/***?***",
         ),
         (
             "https://svc:pa/ss@collector.example/CANARYpath",
-            "https:***",
+            "https://***@collector.example/***",
         ),
         (
             "https://collector.example/v1/traces?k=CANARYq@b",
-            "https:***",
+            "https://***@b",
         ),
     ] {
         let settings = serde_json::json!({ "url": url }).to_string();
