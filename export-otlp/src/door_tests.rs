@@ -790,3 +790,22 @@ fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
         )]
     );
 }
+
+/// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the
+/// scheme, so a schemeless `admin:secret@collector/x` (which the parser reads as scheme `admin`)
+/// echoed `admin`. Only `http` and `https` are shown; any other is `***`.
+#[test]
+fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
+    use busbar_contract::abi::sdk::life::Life;
+    for url in ["admin:secret@collector/x", "ftp:svc/tok@collector/x?k=SECRET"] {
+        let settings = serde_json::json!({ "url": url }).to_string();
+        let text = Otlp::validate(settings.as_bytes())
+            .expect_err(url)
+            .text()
+            .expect("a refusal says why")
+            .to_string();
+        assert!(text.contains("url `***` is ambiguous"), "{url}: {text}");
+        assert!(!text.contains("admin") && !text.contains("ftp"), "{text}");
+        assert_eq!(crate::log_target(url), "***", "{url}");
+    }
+}
