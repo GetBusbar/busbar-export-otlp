@@ -907,6 +907,20 @@ fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
     assert_eq!(need.keep_mode, KEEP_NAMED);
 }
 
+/// THE STATEMENT STATES THE ALIAS REWRITE: one rewrite, of the alias class, from the module name
+/// `otlp` (its bytes, read from the Statement the door states).
+#[test]
+fn the_statement_states_the_otlp_alias_rewrite() {
+    use busbar_contract::abi::mechanism::door::REWRITE_ALIAS;
+    let st = busbar_export_otlp::door::STATEMENT;
+    assert_eq!(st.rewrites_len, 1);
+    // SAFETY: the Statement's rewrites are a `'static` list of `rewrites_len` entries.
+    let rewrite = unsafe { std::slice::from_raw_parts(st.rewrites, st.rewrites_len) }[0];
+    assert_eq!(rewrite.class, REWRITE_ALIAS);
+    // SAFETY: the Statement's strings are `'static`.
+    assert_eq!(unsafe { rewrite.from.bytes() }, b"otlp");
+}
+
 // ── THE PUBLISHED CONFORMANCE SUITE ─────────────────────────────────────────────────────────────
 //
 // busbar's suite, at the commit this repo pins (`.busbar-ref`), drives the OTLP sink two ways
