@@ -744,3 +744,30 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
         }
     }
 }
+
+/// RED before: a 2xx whose `partial_success` rejected no span but carries an error message (the
+/// collector's warning) was silent. It is a warn line under its own code, BUSBAR-7145, with the
+/// message capped, scrubbed and quoted; `rejected_spans > 0` stays BUSBAR-7143.
+#[test]
+fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://u:SECRETpw@c.example/v1/traces");
+    let lines = captured(|| {
+        otlp.settle(
+            &run,
+            &Ok(ExchangeResponse {
+                status: 200,
+                body: partial_success_body(0, "slow down SECRETpw"),
+                ..ExchangeResponse::default()
+            }),
+        )
+    });
+    assert_eq!(
+        lines,
+        [(
+            tracing::Level::WARN,
+            "OTLP collector warned about this batch: \"slow down ***\"".to_string(),
+            " diag=BUSBAR-7145 endpoint=https://***@c.example/v1/traces".to_string()
+        )]
+    );
+}
