@@ -139,14 +139,35 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
 /// its host is not ambiguous here. The words are the SDK's (`sdk::url::ambiguous_url`); this
 /// parser decides what the path is.
 pub fn ambiguous_url(url: &str) -> Option<String> {
-    match url::Url::parse(url) {
-        Ok(parsed) => sdk_url::ambiguous_url(url, &parsed[url::Position::BeforePath..]),
+    let from_path = match url::Url::parse(url) {
+        Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
         Err(_) => {
             let (_, rest) = url.split_once("://")?;
-            let tail = &rest[rest.find(['/', '?', '#'])?..];
-            sdk_url::ambiguous_url(url, tail)
+            rest[rest.find(['/', '?', '#'])?..].to_string()
         }
+    };
+    // The SDK echoes `url` cut of its userinfo; what follows the host is cut here, as `log_target`
+    // cuts it, since a collector's path or query can carry a key.
+    sdk_url::ambiguous_url(&path_cut(&cut_userinfo(url, "***@")), &from_path)
+}
+
+/// `url` (its userinfo already cut) with its path replaced by `/***`, its query by `?***` and its
+/// fragment dropped; the scheme and authority stay.
+fn path_cut(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let tail = &rest[end..];
+    let before_fragment = tail.split('#').next().unwrap_or("");
+    let mut out = format!("{scheme}://{}", &rest[..end]);
+    if before_fragment.starts_with('/') {
+        out.push_str("/***");
     }
+    if before_fragment.contains('?') {
+        out.push_str("?***");
+    }
+    out
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
