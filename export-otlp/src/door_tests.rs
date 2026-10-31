@@ -569,7 +569,7 @@ fn the_disabling_and_skipped_record_lines_carry_their_codes() {
 }
 
 /// Every code the declaration states is raised on a line, and the declaration states exactly the
-/// five codes the sink raises.
+/// six codes the sink raises.
 #[test]
 fn every_declared_code_is_on_a_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -580,7 +580,7 @@ fn every_declared_code_is_on_a_line() {
         .iter()
         .map(|c| c["code"].as_u64().unwrap())
         .collect();
-    assert_eq!(declared, vec![7140, 7141, 7142, 7143, 7144]);
+    assert_eq!(declared, vec![7140, 7141, 7142, 7143, 7144, 7145]);
     let (otlp, run) = admitted_run("https://c.example/v1/traces");
     let mut fields = String::new();
     let mut take = |lines: Vec<(tracing::Level, String, String)>| {
@@ -606,6 +606,16 @@ fn every_declared_code_is_on_a_line() {
             &Ok(ExchangeResponse {
                 status: 200,
                 body: partial_success_body(1, ""),
+                ..ExchangeResponse::default()
+            }),
+        )
+    }));
+    take(captured(|| {
+        otlp.settle(
+            &run,
+            &Ok(ExchangeResponse {
+                status: 200,
+                body: partial_success_body(0, "slow down"),
                 ..ExchangeResponse::default()
             }),
         )
@@ -679,19 +689,19 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
     for (url, shown) in [
         (
             "https://tok/en@collector.example:4318/CANARYpath/x?key=CANARYquery",
-            "https://***@collector.example:4318/***?***",
+            "https:***",
         ),
         (
             "https://tok/en@collector.example/v1/traces?key=CANARYquery#CANARYfrag",
-            "https://***@collector.example/***?***",
+            "https:***",
         ),
         (
             "https://svc:pa/ss@collector.example/CANARYpath",
-            "https://***@collector.example/***",
+            "https:***",
         ),
         (
             "https://collector.example/v1/traces?k=CANARYq@b",
-            "https://***@b",
+            "https:***",
         ),
     ] {
         let settings = serde_json::json!({ "url": url }).to_string();
@@ -703,5 +713,102 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
             text.contains(&format!("url `{shown}` is ambiguous")),
             "{url}: {text}"
         );
+    }
+}
+
+/// RED before (HX-SLASHLESS): a url written without its slashes, or one the parser rejects, was
+/// echoed (and its `@` ignored) by helpers that need `://`. Any url text that does not parse and
+/// holds an `@` is refused as ambiguous, and no refusal, shown target or line holds a part of it.
+#[test]
+fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
+    use busbar_contract::abi::sdk::life::Life;
+    for (url, secrets) in [
+        (
+            "https:user:pass@host/x?k=SECRET",
+            &["user", "pass", "SECRET"][..],
+        ),
+        ("https:svc-token/abc@host/x", &["svc-token", "abc"][..]),
+        ("https:svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
+        (
+            "https://h/hook?to=ops@corp.com&key=SECRET",
+            &["ops", "corp", "SECRET"][..],
+        ),
+        ("https://svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
+        (
+            "https://bad host:99999/x@y?k=SECRET",
+            &["SECRET", "bad host"][..],
+        ),
+    ] {
+        let settings = serde_json::json!({ "url": url }).to_string();
+        let parses = url::Url::parse(url).is_ok();
+        let verdict = Otlp::validate(settings.as_bytes());
+        if let Err(refusal) = &verdict {
+            let text = refusal.text().expect("a refusal says why");
+            for s in secrets {
+                assert!(!text.contains(s), "{url}: `{s}` in {text}");
+            }
+        }
+        if !parses {
+            let refusal = verdict.expect_err(url);
+            let text = refusal.text().expect("a refusal says why");
+            assert!(text.contains("is ambiguous"), "{url}: {text}");
+            assert!(
+                text.contains("url `https:***` is ambiguous"),
+                "{url}: {text}"
+            );
+        }
+        let shown = Endpoint::of(&crate::OtlpSettings { url: url.into() }).shown;
+        for s in secrets {
+            assert!(!shown.contains(s), "{url}: `{s}` in shown {shown}");
+        }
+    }
+}
+
+/// RED before: a 2xx whose `partial_success` rejected no span but carries an error message (the
+/// collector's warning) was silent. It is a warn line under its own code, BUSBAR-7145, with the
+/// message capped, scrubbed and quoted; `rejected_spans > 0` stays BUSBAR-7143.
+#[test]
+fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://u:SECRETpw@c.example/v1/traces");
+    let lines = captured(|| {
+        otlp.settle(
+            &run,
+            &Ok(ExchangeResponse {
+                status: 200,
+                body: partial_success_body(0, "slow down SECRETpw"),
+                ..ExchangeResponse::default()
+            }),
+        )
+    });
+    assert_eq!(
+        lines,
+        [(
+            tracing::Level::WARN,
+            "OTLP collector warned about this batch: \"slow down ***\"".to_string(),
+            " diag=BUSBAR-7145 endpoint=https://***@c.example/v1/traces".to_string()
+        )]
+    );
+}
+
+/// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the
+/// scheme, so a schemeless `admin:secret@collector/x` (which the parser reads as scheme `admin`)
+/// echoed `admin`. Only `http` and `https` are shown; any other is `***`.
+#[test]
+fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
+    use busbar_contract::abi::sdk::life::Life;
+    for url in [
+        "admin:secret@collector/x",
+        "ftp:svc/tok@collector/x?k=SECRET",
+    ] {
+        let settings = serde_json::json!({ "url": url }).to_string();
+        let text = Otlp::validate(settings.as_bytes())
+            .expect_err(url)
+            .text()
+            .expect("a refusal says why")
+            .to_string();
+        assert!(text.contains("url `***` is ambiguous"), "{url}: {text}");
+        assert!(!text.contains("admin") && !text.contains("ftp"), "{text}");
+        assert_eq!(crate::log_target(url), "***", "{url}");
     }
 }

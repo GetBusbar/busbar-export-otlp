@@ -902,7 +902,12 @@ fn log_target_masks_a_credential_in_its_fall_through_branches() {
         assert!(url::Url::parse(&text).is_ok(), "{text} parses");
         let shown = log_target(&text);
         assert!(!shown.contains(KEY), "{text}: {shown}");
-        assert!(shown.ends_with(":***"), "{text}: {shown}");
+        // A scheme other than http(s) is shown only when no `@` follows it (`mailto:ops:KEY@x`
+        // parses as the scheme `mailto`, but the word before a `:` there may be a credential).
+        assert!(
+            shown.ends_with(":***") || (text.contains('@') && shown == "***"),
+            "{text}: {shown}"
+        );
     }
     // An unparsable url with a `://`: userinfo cut, path masked.
     let shown = log_target(&format!("https://user:{KEY}/x@host:99999/p/{KEY}"));
