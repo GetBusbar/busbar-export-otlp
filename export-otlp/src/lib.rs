@@ -64,17 +64,16 @@ const OTLP_TRACES_PATH: &str = "/v1/traces";
 /// `url` as a log line or `Debug` names it: scheme, a masked userinfo, host
 /// and port. A path becomes `/***` unless it is `/` or OTLP's own `/v1/traces`, since a collector key
 /// may ride in the path. A query becomes `?***` (`?api-key=`). A fragment is dropped. A string that
-/// is not a URL keeps only its scheme and authority, userinfo cut.
+/// is not a URL keeps only its scheme (see [`unparsed_target`]).
 pub fn log_target(url: &str) -> String {
     let Ok(u) = url::Url::parse(url) else {
-        let cut = cut_userinfo(url, "***@");
-        let Some((scheme, rest)) = cut.split_once("://") else {
-            return "***".to_string();
-        };
-        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-        let tail = if end < rest.len() { "/***" } else { "" };
-        return format!("{scheme}://{}{tail}", &rest[..end]);
+        return unparsed_target(url);
     };
+    // An ambiguous url (an `@` after its host) is refused at the door; were one to get here, its
+    // parsed host is the front of a credential, so it shows as an unparsed one does.
+    if u[url::Position::BeforePath..].contains('@') {
+        return unparsed_target(url);
+    }
     let Some(host) = u.host_str() else {
         return format!("{}:***", u.scheme());
     };
@@ -128,46 +127,34 @@ pub fn scrub(text: &str, parts: &[String]) -> String {
     sdk_url::scrub(text, parts.to_vec(), false)
 }
 
+/// What a line shows of url text that does not parse: `<scheme>:***` when it opens with a scheme,
+/// else `***`. Nothing after the scheme is shown: without a parse there is no telling credential
+/// from host.
+fn unparsed_target(url: &str) -> String {
+    let scheme = url.split_once(':').map(|(s, _)| s).filter(|s| {
+        s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    scheme.map_or_else(|| "***".to_string(), |s| format!("{s}:***"))
+}
+
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` carries an `@` after its host —
 /// `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
 /// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
 /// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
-/// lines. The refusal shows the url with everything before its last `@` cut, never the credential.
-/// A url that does not parse is read the same way by hand: the text after `://`, from its first
-/// `/`, `?` or `#`, is what a parser would take for the path (`https://svc:pa/ss@collector/…`
-/// fails on the port `pa`, and its credential would silently be dropped). A url with no `@` after
-/// its host is not ambiguous here. The words are the SDK's (`sdk::url::ambiguous_url`); this
-/// parser decides what the path is.
+/// lines. A url that does not parse and holds an `@` anywhere is refused the same way
+/// (`https:svc:pa/ss@collector/…` fails on the port `pa`; its credential would silently be
+/// dropped). A parsed url with no `@` after its host is not ambiguous. The refusal shows only
+/// `<scheme>:***` ([`unparsed_target`]): the parser's host of an ambiguous url is the front of the
+/// credential, so no part of the text is echoed. The words are the SDK's (`sdk::url::ambiguous_url`).
 pub fn ambiguous_url(url: &str) -> Option<String> {
     let from_path = match url::Url::parse(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
-        Err(_) => {
-            let (_, rest) = url.split_once("://")?;
-            rest[rest.find(['/', '?', '#'])?..].to_string()
-        }
+        Err(_) if url.contains('@') => "@".to_string(),
+        Err(_) => return None,
     };
-    // The SDK echoes `url` cut of its userinfo; what follows the host is cut here, as `log_target`
-    // cuts it, since a collector's path or query can carry a key.
-    sdk_url::ambiguous_url(&path_cut(&cut_userinfo(url, "***@")), &from_path)
-}
-
-/// `url` (its userinfo already cut) with its path replaced by `/***`, its query by `?***` and its
-/// fragment dropped; the scheme and authority stay.
-fn path_cut(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let tail = &rest[end..];
-    let before_fragment = tail.split('#').next().unwrap_or("");
-    let mut out = format!("{scheme}://{}", &rest[..end]);
-    if before_fragment.starts_with('/') {
-        out.push_str("/***");
-    }
-    if before_fragment.contains('?') {
-        out.push_str("?***");
-    }
-    out
+    sdk_url::ambiguous_url(&unparsed_target(url), &from_path)
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic

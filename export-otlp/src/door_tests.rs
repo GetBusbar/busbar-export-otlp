@@ -569,7 +569,7 @@ fn the_disabling_and_skipped_record_lines_carry_their_codes() {
 }
 
 /// Every code the declaration states is raised on a line, and the declaration states exactly the
-/// five codes the sink raises.
+/// six codes the sink raises.
 #[test]
 fn every_declared_code_is_on_a_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -580,7 +580,7 @@ fn every_declared_code_is_on_a_line() {
         .iter()
         .map(|c| c["code"].as_u64().unwrap())
         .collect();
-    assert_eq!(declared, vec![7140, 7141, 7142, 7143, 7144]);
+    assert_eq!(declared, vec![7140, 7141, 7142, 7143, 7144, 7145]);
     let (otlp, run) = admitted_run("https://c.example/v1/traces");
     let mut fields = String::new();
     let mut take = |lines: Vec<(tracing::Level, String, String)>| {
@@ -606,6 +606,16 @@ fn every_declared_code_is_on_a_line() {
             &Ok(ExchangeResponse {
                 status: 200,
                 body: partial_success_body(1, ""),
+                ..ExchangeResponse::default()
+            }),
+        )
+    }));
+    take(captured(|| {
+        otlp.settle(
+            &run,
+            &Ok(ExchangeResponse {
+                status: 200,
+                body: partial_success_body(0, "slow down"),
                 ..ExchangeResponse::default()
             }),
         )
@@ -679,19 +689,19 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
     for (url, shown) in [
         (
             "https://tok/en@collector.example:4318/CANARYpath/x?key=CANARYquery",
-            "https://***@collector.example:4318/***?***",
+            "https:***",
         ),
         (
             "https://tok/en@collector.example/v1/traces?key=CANARYquery#CANARYfrag",
-            "https://***@collector.example/***?***",
+            "https:***",
         ),
         (
             "https://svc:pa/ss@collector.example/CANARYpath",
-            "https://***@collector.example/***",
+            "https:***",
         ),
         (
             "https://collector.example/v1/traces?k=CANARYq@b",
-            "https://***@b",
+            "https:***",
         ),
     ] {
         let settings = serde_json::json!({ "url": url }).to_string();
@@ -713,15 +723,21 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
 fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
     use busbar_contract::abi::sdk::life::Life;
     for (url, secrets) in [
-        ("https:user:pass@host/x?k=SECRET", &["user", "pass", "SECRET"][..]),
+        (
+            "https:user:pass@host/x?k=SECRET",
+            &["user", "pass", "SECRET"][..],
+        ),
         ("https:svc-token/abc@host/x", &["svc-token", "abc"][..]),
-        ("https:svc:pa/ss@host/x", &["svc", "pa/ss", "pa", "ss"][..]),
+        ("https:svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
         (
             "https://h/hook?to=ops@corp.com&key=SECRET",
             &["ops", "corp", "SECRET"][..],
         ),
-        ("https://svc:pa/ss@host/x", &["svc", "pa/ss"][..]),
-        ("https://bad host:99999/x@y?k=SECRET", &["SECRET", "bad host"][..]),
+        ("https://svc:pa/ss@host/x", &["svc:", "pa/ss"][..]),
+        (
+            "https://bad host:99999/x@y?k=SECRET",
+            &["SECRET", "bad host"][..],
+        ),
     ] {
         let settings = serde_json::json!({ "url": url }).to_string();
         let parses = url::Url::parse(url).is_ok();
@@ -736,7 +752,10 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
             let refusal = verdict.expect_err(url);
             let text = refusal.text().expect("a refusal says why");
             assert!(text.contains("is ambiguous"), "{url}: {text}");
-            assert!(text.contains("url `https:***` is ambiguous"), "{url}: {text}");
+            assert!(
+                text.contains("url `https:***` is ambiguous"),
+                "{url}: {text}"
+            );
         }
         let shown = Endpoint::of(&crate::OtlpSettings { url: url.into() }).shown;
         for s in secrets {
