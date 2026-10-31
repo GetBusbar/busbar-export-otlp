@@ -48,6 +48,15 @@
       "summary": "A line of the traces stream was not exported because it is not JSON or carries no span identity (trace and span ids), so that span is missing from the collector.",
       "action": "Check what writes the traces stream; every record must be a JSON object with trace and span ids.",
       "since": "1.6.0"
+    },
+    {
+      "code": 7145,
+      "slug": "otlp-collector-warning",
+      "title": "OTLP collector warned about a batch",
+      "severity": "actionable",
+      "summary": "The collector accepted an OTLP export and rejected no span, but its partial_success reply carries a message, which is a warning about that batch.",
+      "action": "Read the collector's message on the line and fix what it warns about, such as span age or attributes.",
+      "since": "1.6.0"
     }
   ]
 }
