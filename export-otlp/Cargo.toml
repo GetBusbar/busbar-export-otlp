@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 # The operator's endpoint: its userinfo moves into an `Authorization: Basic` header and out of the
 # URL, and is masked in every line this sink writes.
 url = { workspace = true }
+zeroize = { workspace = true }
 # The OTLP request's protobuf encoding (the fleet's protobuf library; its derive writes the eleven
 # messages this sink sends). The userinfo's percent-decoding and Basic base64 are the SDK's
 # (`busbar_contract::abi::sdk::url`).

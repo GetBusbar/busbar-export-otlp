@@ -42,8 +42,8 @@ mod ownership_tests;
 mod wipe_probe;
 
 /// The parsed serialization is an owned allocation, separately from the settings text.
-fn parsed_url(text: &str) -> Result<url::Url, url::ParseError> {
-    let parsed = url::Url::parse(text)?;
+fn parsed_url(text: &str) -> Result<owners::ParsedUrl, url::ParseError> {
+    let parsed = owners::ParsedUrl::parse(text)?;
     #[cfg(test)]
     crate::wipe_probe::watch("parsed url", parsed.as_str().as_bytes());
     Ok(parsed)
@@ -51,11 +51,13 @@ fn parsed_url(text: &str) -> Result<url::Url, url::ParseError> {
 
 pub mod config;
 pub mod door;
+mod owners;
 pub mod proto;
 
 use busbar_contract::abi::sdk::mask::mask_url;
 use busbar_contract::abi::sdk::url::{self as sdk_url, cut_userinfo, Userinfo};
 pub use config::OtlpSettings;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Why a second instance is refused, the tail of the limits check's line
 /// (`busbar_contract::abi::sdk::export::second_instances`): the sink states the `one_instance`
@@ -117,7 +119,9 @@ pub fn log_target(url: &str) -> String {
 /// as written and masked (`busbar_contract::abi::sdk::mask::mask_url`), the URL without userinfo,
 /// its path (unless OTLP's own), query and userinfo, each also percent-decoded; longest first.
 pub fn secret_parts(url: &str) -> Vec<String> {
-    let mut parts = vec![url.to_string(), mask_url(url), split_credentials(url).0];
+    let (clean, mut unused_authorization) = split_credentials(url);
+    unused_authorization.zeroize();
+    let mut parts = Zeroizing::new(vec![url.to_string(), mask_url(url), clean]);
     if let Ok(u) = parsed_url(url) {
         if !matches!(u.path(), "" | "/" | OTLP_TRACES_PATH) {
             parts.push(u.path().to_string());
@@ -125,20 +129,30 @@ pub fn secret_parts(url: &str) -> Vec<String> {
         if let Some(q) = u.query().filter(|q| !q.is_empty()) {
             parts.push(q.to_string());
         }
+        if let Some(fragment) = u.fragment().filter(|fragment| !fragment.is_empty()) {
+            parts.push(fragment.to_string());
+        }
         if let Some(p) = u.password() {
             parts.push(p.to_string());
         }
         parts.push(u.username().to_string());
     }
-    let mut parts = sdk_url::and_decoded(parts);
+    let mut parts = Zeroizing::new(sdk_url::and_decoded(std::mem::take(&mut *parts)));
     parts.retain(|p| !p.is_empty());
     parts.sort_by_key(|p| std::cmp::Reverse(p.len()));
-    parts.dedup();
+    parts.dedup_by(|removed, kept| {
+        if removed == kept {
+            removed.zeroize();
+            true
+        } else {
+            false
+        }
+    });
     #[cfg(test)]
-    for part in &parts {
+    for part in parts.iter() {
         crate::wipe_probe::watch("redaction part", part.as_bytes());
     }
-    parts
+    std::mem::take(&mut *parts)
 }
 
 /// `text` (the host's failure words, which may quote the target) with each of `parts`
@@ -169,11 +183,11 @@ fn unparsed_target(url: &str) -> String {
 /// `<scheme>:***` ([`unparsed_target`]): the parser's host of an ambiguous url is the front of the
 /// credential, so no part of the text is echoed. The words are the SDK's (`sdk::url::ambiguous_url`).
 pub fn ambiguous_url(url: &str) -> Option<String> {
-    let from_path = match parsed_url(url) {
+    let from_path = Zeroizing::new(match parsed_url(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
         Err(_) if url.contains('@') => "@".to_string(),
         Err(_) => return None,
-    };
+    });
     sdk_url::ambiguous_url(&unparsed_target(url), &from_path)
 }
 
@@ -181,7 +195,7 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 /// base64(user:pass)))` — RFC 7617, the userinfo percent-decoded — or `(endpoint, None)` when it
 /// carries none or is not a URL. What the request carries never holds the secret in its target.
 pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
-    let Ok(mut parsed) = parsed_url(endpoint) else {
+    let Ok(parsed) = parsed_url(endpoint) else {
         // Not a URL the client can parse (any string is accepted as the url): no credential is
         // made of it, and its userinfo never reaches the host's dial target.
         return (cut_userinfo(endpoint, ""), None);
@@ -195,14 +209,22 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     };
     #[cfg(test)]
     crate::wipe_probe::watch("Basic value", authorization.as_bytes());
-    let clean = if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+    let clean = if parsed.host_str().is_none_or(str::is_empty) || parsed.scheme() == "file" {
         let host = parsed.host_str().unwrap_or("");
         match parsed.port() {
             Some(p) => format!("{}://{host}:{p}", parsed.scheme()),
             None => format!("{}://{host}", parsed.scheme()),
         }
     } else {
-        parsed.into()
+        // Url's setters clone the suffix containing the password and target into an unwiped
+        // temporary. Its public serialization positions let us omit only userinfo, preserving
+        // the already-normalized host, port, path, query and fragment without that duplicate.
+        let prefix = &parsed[..url::Position::BeforeUsername];
+        let suffix = &parsed[url::Position::BeforeHost..];
+        let mut clean = String::with_capacity(prefix.len() + suffix.len());
+        clean.push_str(prefix);
+        clean.push_str(suffix);
+        clean
     };
     (clean, Some(authorization))
 }

@@ -4,7 +4,8 @@
 //! THE DOOR: the OTLP sink on the export kind's table (`busbar_contract::abi::export`), its
 //! lifecycle the SDK's generic one over [`Otlp`] (`abi::sdk::life`), every kind op a [`SafeSlot`].
 //!
-//! * `validate` — the settings parse as [`OtlpSettings`], refusing in serde's words.
+//! * `validate` — the settings parse as [`OtlpSettings`], refusing in serde's words or for an
+//!   ambiguous credential-bearing URL.
 //! * `open` / `refresh` — the settings become the endpoint (userinfo split into a Basic header).
 //!   Settings that do not parse are refused in `validate`'s words; a refused `refresh` leaves the
 //!   instance as it was.
@@ -16,6 +17,7 @@
 //! * `status` — READY with nothing to report.
 //! * `check` — READY with nothing to report, except at the limits phase, where it returns the
 //!   one-instance refusal findings ([`second_instances`], [`crate::ONE_INSTANCE`]).
+//! `deliver` and `check` refuse with [`NO_INSTANCE`] when no instance is open.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
@@ -87,6 +89,7 @@ const TAIL: Tail = tail(STREAMS, &[]);
 // nothing; the sink receives the resolved string. (A plain comment: the macro takes no doc.)
 busbar_contract::statement_extensions!(EXTENSIONS: [
     (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
+    ("span_records", b"true"),
 ]);
 
 /// The most deliveries one instance holds in flight; past it the host sheds the batch.
@@ -137,6 +140,12 @@ pub struct Target {
     pub authorization: Option<Cred>,
 }
 
+impl Drop for Target {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.path);
+    }
+}
+
 /// Where each export goes, as one instance's settings name it. Its `Debug` carries no credential:
 /// the collector is named as every line names it, the request target and the `Authorization` the
 /// url's userinfo became are redacted.
@@ -152,6 +161,13 @@ pub struct Endpoint {
     /// The parts of the settings' URL cut from the host's text before it is logged
     /// ([`secret_parts`]).
     pub secrets: Vec<String>,
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.collector);
+        zeroize::Zeroize::zeroize(&mut self.secrets);
+    }
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -187,7 +203,7 @@ impl Endpoint {
                     // Required to go out secured when the operator's url names a secure scheme.
                     Cred::take(&mut serde_json::Value::String(value))
                         .unwrap_or_else(Cred::empty)
-                        .secure_for(&settings.url)
+                        .secure_for(&clean)
                 }),
             },
             collector: clean,
@@ -274,7 +290,8 @@ impl Otlp {
 
     /// What became of one export framed for `run`. A refresh since then makes the answer a stale
     /// one: it settles nothing and says nothing of the current run. A stale failure or non-2xx
-    /// answer is logged at warn as a dropped export; a stale success says nothing.
+    /// answer is logged at warn as a dropped export; a stale 2xx still reports any collector
+    /// rejection, warning or unreadable reply for the old endpoint.
     fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
         let stale = !Arc::ptr_eq(run, &self.run());
         run.settle(stale, result);
@@ -295,29 +312,54 @@ impl Run {
     fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
         let shown = self.endpoint.shown.as_str();
         let secrets = self.endpoint.secrets.as_slice();
-        if !stale {
+        let announcement = if !stale {
             let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
             match (result, *admitted) {
-                (Err(e @ (ConnFailure::Refused(_) | ConnFailure::Unarmed)), None) => {
+                (Err(ConnFailure::Refused(_) | ConnFailure::Unarmed), None) => {
+                    *admitted = Some(false);
+                    Some(false)
+                }
+                (Ok(_), None) => {
+                    *admitted = Some(true);
+                    Some(true)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        // A subscriber may call back into the exporter. Publish the verdict before logging and
+        // release the guard so that callback can inspect the same run.
+        match announcement {
+            Some(false) => {
+                if let Err(error) = result {
                     tracing::error!(
                         diag = %DISABLED,
                         endpoint = %shown,
-                        "{}; disabling OTLP trace export",
-                        scrub(&e.to_string(), secrets)
+                        "{:?}; disabling OTLP trace export",
+                        failure_text(error, secrets)
                     );
-                    *admitted = Some(false);
-                    return;
                 }
-                (Ok(_), None) => {
-                    tracing::info!(endpoint = %shown, "OTLP tracing enabled");
-                    *admitted = Some(true);
-                }
-                _ => {}
+                return;
             }
+            Some(true) => tracing::info!(endpoint = %shown, "OTLP tracing enabled"),
+            None => {}
         }
         match result {
             Ok(reply) if (200..300).contains(&reply.status) => {
-                if let Some((rejected_spans, message)) = proto::rejected(&reply.body) {
+                let partial = match proto::collector_response(&reply.body) {
+                    Ok(partial) => partial,
+                    Err(_) => {
+                        tracing::warn!(
+                            diag = %PARTIAL_WARNING,
+                            endpoint = %shown,
+                            status = reply.status,
+                            "OTLP collector reply is not a valid protobuf response; partial-success details are unavailable"
+                        );
+                        return;
+                    }
+                };
+                if let Some((rejected_spans, message)) = partial {
                     let message = capped(&scrub(&message, secrets));
                     if rejected_spans > 0 {
                         tracing::warn!(
@@ -352,11 +394,12 @@ pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
 fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
-    let value = busbar_contract::abi::sdk::life::settings_value(settings)?;
+    let value =
+        crate::owners::SettingsValue(busbar_contract::abi::sdk::life::settings_value(settings)?);
     #[cfg(test)]
     crate::ownership_tests::watch_settings_value(&value);
-    let settings: OtlpSettings =
-        serde_json::from_value(value).map_err(|e| Refusal::failed(format!("settings: {e}")))?;
+    let settings: OtlpSettings = serde::Deserialize::deserialize(&*value)
+        .map_err(|e: serde_json::Error| Refusal::failed(format!("settings: {e}")))?;
     if let Some(refusal) = crate::ambiguous_url(&settings.url) {
         return Err(Refusal::failed(refusal));
     }
@@ -494,6 +537,14 @@ fn delivered_past_bound(
 ) -> Result<ExchangeResponse, ConnFailure> {
     match (&result, head_status) {
         (Err(ConnFailure::Failed(text)), Some(status)) if text == REPLY_OVER_BOUND => {
+            if (200..300).contains(&status) {
+                tracing::warn!(
+                    diag = %PARTIAL_WARNING,
+                    status,
+                    reply_limit = REPLY_LIMIT,
+                    "OTLP collector reply exceeded the body limit; partial-success details are unavailable"
+                );
+            }
             Ok(ExchangeResponse {
                 status,
                 ..ExchangeResponse::default()
@@ -506,12 +557,27 @@ fn delivered_past_bound(
 /// The line an export that did not reach the collector writes, the host's text cut of the target's
 /// credential-bearing parts.
 fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
-    tracing::warn!(
-        diag = %TRANSPORT_FAILURE,
-        endpoint = %shown,
-        error = %scrub(&error.to_string(), secrets),
-        "OTLP span export failed; this batch was dropped"
-    );
+    let message = failure_text(error, secrets);
+    if matches!(error, ConnFailure::Refused(_) | ConnFailure::Unarmed) {
+        tracing::warn!(
+            diag = %TRANSPORT_FAILURE,
+            endpoint = %shown,
+            error = ?message,
+            "OTLP span export was refused; this batch was dropped"
+        );
+    } else {
+        tracing::warn!(
+            diag = %TRANSPORT_FAILURE,
+            endpoint = %shown,
+            error = ?message,
+            "OTLP span export failed; this batch was dropped"
+        );
+    }
+}
+
+fn failure_text(error: &ConnFailure, secrets: &[String]) -> String {
+    let raw = zeroize::Zeroizing::new(error.to_string());
+    scrub(&raw, secrets)
 }
 
 /// `check`: at the limits phase, a refusal of every instance after the first

@@ -19,6 +19,8 @@ ATTRS = ["pool", "ingress", "op", "lane", "provider", "model"]
 
 def val(v):
     """A fixture JSON value as the canonical OTLP AnyValue."""
+    if v is None:
+        return ("empty", None)
     if isinstance(v, bool):
         return ("bool", v)
     if isinstance(v, str):
@@ -29,7 +31,7 @@ def val(v):
         return ("double", v)
     if isinstance(v, list):
         return ("array", [val(x) for x in v])
-    return ("str", json.dumps(v, separators=(",", ":")))
+    return ("str", json.dumps(v, separators=(",", ":"), ensure_ascii=False, sort_keys=True))
 
 
 def sid(x):
@@ -41,7 +43,7 @@ def sid(x):
 def kvs(lst):
     out = []
     for kv in lst or []:
-        if isinstance(kv, dict) and isinstance(kv.get("key"), str) and "value" in kv:
+        if isinstance(kv, dict) and isinstance(kv.get("key"), str) and kv.get("value") is not None:
             out.append((kv["key"], val(kv["value"])))
     return out
 
@@ -82,6 +84,8 @@ def expected(fixture):
 
 
 def anyval(a):
+    if not a:
+        return ("empty", None)
     (k, v), = a.items()
     if k == "stringValue":
         return ("str", v)
@@ -230,9 +234,13 @@ def control(directory, service, signal, minimum):
 
 
 if __name__ == "__main__":
-    cmd, args = sys.argv[1], sys.argv[2:]
-    fn = {"compare": compare, "bites": bites, "control": control}[cmd]
-    problems = fn(*args)
+    try:
+        cmd, args = sys.argv[1], sys.argv[2:]
+        fn = {"compare": compare, "bites": bites, "control": control}[cmd]
+        problems = fn(*args)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, StopIteration) as error:
+        print(f"FAIL: cannot evaluate OTLP collector output: {type(error).__name__}: {error}")
+        sys.exit(1)
     for p in problems:
         print("FAIL:", p)
     if not problems:

@@ -12,7 +12,20 @@ First-party signed kind:export plugin cdylib: the OTLP trace export sink (module
 
 ## What it is for
 
-`busbar-export-otlp` is a `kind: export` busbar plugin.
+`busbar-export-otlp` sends the `traces` stream to an OTLP/HTTP protobuf collector. Each batch
+becomes one request with resource `service.name = busbar` and scope `busbar`. Full span records
+preserve typed attributes, events, nanosecond timestamps and error status.
+
+Exports are never retried. A connector refusal on the first delivery disables the run until
+reload; a transport failure or non-2xx response drops that batch. `OTLP tracing enabled` means
+the host admitted the connection, and can accompany a collector error status. Collector partial
+rejections report the rejected count; collector warnings report their message. Malformed or
+oversized 2xx replies warn that partial-success details are unavailable, without assuming the
+whole batch was rejected.
+
+Diagnostics are `BUSBAR-7140` (disabled), `7141` (non-2xx), `7142` (delivery failure), `7143`
+(partial rejection), `7144` (skipped record), and `7145` (collector warning). Foreign error text is
+scrubbed and quoted; collector messages are also capped after scrubbing.
 
 ## Config
 

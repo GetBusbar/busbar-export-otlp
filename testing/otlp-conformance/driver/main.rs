@@ -33,7 +33,7 @@ fn main() {
             let payload = body(&std::fs::read(&args[3]).expect("read batch"));
             let (request, sealed) = endpoint.parts(payload);
             assert!(sealed.is_empty(), "the suite's collector url carries no credential");
-            let collector = endpoint.collector;
+            let collector = &endpoint.collector;
             let authority = collector
                 .split("://")
                 .nth(1)

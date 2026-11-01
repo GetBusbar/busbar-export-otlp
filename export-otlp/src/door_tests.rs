@@ -992,7 +992,9 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
                 "{url}: {text}"
             );
         }
-        let shown = Endpoint::of(&crate::OtlpSettings { url: url.into() }).shown;
+        let shown = Endpoint::of(&crate::OtlpSettings { url: url.into() })
+            .shown
+            .clone();
         for s in secrets {
             assert!(!shown.contains(s), "{url}: `{s}` in shown {shown}");
         }

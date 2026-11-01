@@ -10,7 +10,7 @@
 #   NEGATIVE CONTROL  a corrupt protobuf body and a wrong content-type must be refused by the
 #                     collector (and write nothing), and the intact-comparison must catch each of a
 #                     set of planted losses (dropped attribute, shifted timestamp, changed id ...).
-#   SUBJECT           the plugin's own request builder (driver.rs, built against $BUSBAR_CHECKOUT)
+#   SUBJECT           the plugin's own request builder (driver/main.rs, built against $BUSBAR_CHECKOUT)
 #                     delivers the fixture batch; the collector's file output is compared with what
 #                     the fixture says must arrive: ids, names, timestamps, attributes (typed),
 #                     events, status, resource and scope.
@@ -98,11 +98,14 @@ if ! docker pull -q "$COLLECTOR_IMAGE" >/dev/null || ! docker pull -q "$TELEMETR
 fi
 if collector_start control; then
   for proto in http grpc; do
-    ep=collector:4318; flag=(--otlp-http); [ "$proto" = grpc ] && { ep=collector:4317; flag=(); }
+    flag=(--otlp-insecure)
+    if [ "$proto" = grpc ]; then ep=collector:4317; else ep=collector:4318; flag+=(--otlp-http); fi
     for sig in traces metrics logs; do
       count=(--"$sig" 5)
-      docker run --rm --network "$NET" "$TELEMETRYGEN_IMAGE" "$sig" --otlp-endpoint "$ep" "${flag[@]}" \
-        --otlp-insecure --service "ctl-$proto" "${count[@]}" --rate 0 >"$OUT/work/telemetrygen-$proto-$sig.log" 2>&1 \
+      generator="otlpconf-$$-telemetrygen-$proto-$sig"
+      CONTAINERS+=("$generator")
+      docker run --rm --name "$generator" --network "$NET" "$TELEMETRYGEN_IMAGE" "$sig" --otlp-endpoint "$ep" "${flag[@]}" \
+        --service "ctl-$proto" "${count[@]}" --rate 0 >"$OUT/work/telemetrygen-$proto-$sig.log" 2>&1 \
         || note "control: telemetrygen $sig over $proto failed ($(tail -1 "$OUT/work/telemetrygen-$proto-$sig.log"))"
     done
   done
@@ -143,10 +146,9 @@ if ( cd "$DRV" && cargo build --release --bin driver ) >"$OUT/work/build.log" 2>
   BUILT=1
 else
   tail -30 "$OUT/work/build.log" >&2
-  note "subject: the driver does not build against busbar $BUSBAR_PIN"
+  note "subject: the driver does not build against busbar ${BUSBAR_PIN:-at $CHECKOUT}"
 fi
-DRIVER="$CARGO_TARGET_DIR/release/driver"
-[ -n "${CARGO_TARGET_DIR:-}" ] || DRIVER="$DRV/target/release/driver"
+DRIVER="${CARGO_TARGET_DIR:-$DRV/target}/release/driver"
 
 # ---- SUBJECT + NEGATIVE CONTROL ------------------------------------------------------------------
 if [ "$BUILT" = 1 ]; then

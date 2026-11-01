@@ -3,7 +3,7 @@
 
 //! ONE `traces` BATCH → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
 //! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded by `prost`
-//! (the fleet's protobuf library) over the eleven messages it takes, declared here with their
+//! (the fleet's protobuf library) over the messages it takes, declared here with their
 //! `.proto` field numbers. Not through `opentelemetry-proto`: that crate depends on `opentelemetry`
 //! and `opentelemetry_sdk` unconditionally (its `trace` feature turns on `opentelemetry_sdk/trace`),
 //! which would link the OpenTelemetry SDK, a tracer runtime this sink does not run, into the
@@ -23,6 +23,12 @@
 //! | `start` (epoch µs) | `start_time_unix_nano` (7) |
 //! | `start` + `duration_us` | `end_time_unix_nano` (8) |
 //! | `pool` `ingress` `op` `lane` `provider` `model` | `attributes` (9), in that order, typed as the record states them: a string a `string_value`, an integer an `int_value`, a boolean a `bool_value`, a float a `double_value` |
+//!
+//! When the host supplies the full `span` member, it supplies the identity and name instead of
+//! the projected fields. `start_ns` and `end_ns` are already nanoseconds. Ordered `attributes`
+//! preserve scalar and array types; objects are compact JSON text, null attributes are omitted,
+//! and null array items are empty AnyValues. `events` preserve their names, `time_ns` and typed
+//! attributes. An error `status` preserves its message; other statuses remain unset.
 //!
 //! Proto3 rules, as every conforming encoder writes them: fields in field-number order, a field at
 //! its default (empty, zero) left off, a `oneof` member written whenever it is set. A record with no
@@ -123,15 +129,22 @@ struct ExportTracePartialSuccess {
 /// `partial_success` rejects spans or carries a message (read lossily as text), `None` for an empty
 /// body, a body that is no `ExportTraceServiceResponse`, or a fully accepted batch.
 pub fn rejected(body: &[u8]) -> Option<(i64, String)> {
-    let partial = ExportTraceServiceResponse::decode(body)
-        .ok()?
-        .partial_success?;
-    (partial.rejected_spans > 0 || !partial.error_message.is_empty()).then(|| {
-        (
-            partial.rejected_spans,
-            String::from_utf8_lossy(&partial.error_message).into_owned(),
-        )
-    })
+    collector_response(body).ok().flatten()
+}
+
+/// Decode the response without treating malformed protobuf as a fully accepted batch.
+pub(crate) fn collector_response(body: &[u8]) -> Result<Option<(i64, String)>, prost::DecodeError> {
+    let Some(partial) = ExportTraceServiceResponse::decode(body)?.partial_success else {
+        return Ok(None);
+    };
+    Ok(
+        (partial.rejected_spans > 0 || !partial.error_message.is_empty()).then(|| {
+            (
+                partial.rejected_spans,
+                String::from_utf8_lossy(&partial.error_message).into_owned(),
+            )
+        }),
+    )
 }
 
 /// `Span.Event` (trace/v1).
