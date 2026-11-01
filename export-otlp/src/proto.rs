@@ -34,13 +34,52 @@
 //! its default (empty, zero) left off, a `oneof` member written whenever it is set. A record with no
 //! usable `trace_id` or `span_id` is no span; a batch with no span encodes to nothing.
 
+use busbar_contract::abi::export::ExportField;
 use prost::Message as _;
 use serde_json::Value;
 
 /// The OTLP resource's `service.name`, and the instrumentation scope's name.
 pub const SERVICE: &str = "busbar";
 /// The record fields that become span attributes, in the order they are written.
-pub const ATTRIBUTES: [&str; 6] = ["pool", "ingress", "op", "lane", "provider", "model"];
+pub const ATTRIBUTES: [&str; 6] = [
+    ExportField::Pool.as_token(),
+    ExportField::Ingress.as_token(),
+    ExportField::Op.as_token(),
+    ExportField::Lane.as_token(),
+    ExportField::Provider.as_token(),
+    ExportField::Model.as_token(),
+];
+
+/// OpenTelemetry semantic conventions: the resource's service identity attribute.
+const SERVICE_NAME_ATTRIBUTE: &str = "service.name";
+/// SI conversion from the host's projected epoch microseconds to OTLP nanoseconds.
+const NANOS_PER_MICROSECOND: u64 = 1_000;
+/// OTLP trace/v1 TraceId width. The host's u64 identity occupies its trailing bytes.
+const TRACE_ID_BYTES: usize = 16;
+/// Host span identities are u64 values written as fixed-width hexadecimal text.
+const RECORD_ID_BYTES: usize = std::mem::size_of::<u64>();
+const RECORD_ID_HEX_DIGITS: usize = RECORD_ID_BYTES * 2;
+const HEX_RADIX: u32 = 16;
+/// OTLP trace/v1 reserves an all-zero trace or span identity as invalid.
+const INVALID_RECORD_ID: u64 = 0;
+
+/// Full-span JSON vocabulary emitted by busbar-kernel's export/traces.rs
+/// SpanRecord::finish, key_values and Producer::on_event. Projected fields use
+/// ExportField::as_token instead of duplicating the contract's vocabulary.
+mod span_record {
+    pub(super) const KEY: &str = "key";
+    pub(super) const VALUE: &str = "value";
+    pub(super) const ATTRIBUTES: &str = "attributes";
+    pub(super) const EVENTS: &str = "events";
+    pub(super) const TIME_NS: &str = "time_ns";
+    pub(super) const CODE: &str = "code";
+    pub(super) const STATUS: &str = "status";
+    pub(super) const MESSAGE: &str = "message";
+    pub(super) const ERROR: &str = "error";
+    pub(super) const START_NS: &str = "start_ns";
+    pub(super) const END_NS: &str = "end_ns";
+}
+
 /// `SPAN_KIND_INTERNAL`.
 const SPAN_KIND_INTERNAL: i32 = 1;
 
@@ -260,8 +299,8 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
         .into_iter()
         .flatten()
         .filter_map(|kv| {
-            let key = kv.get("key")?.as_str()?;
-            Some(key_value_of(key, any_value(kv.get("value")?)?))
+            let key = kv.get(span_record::KEY)?.as_str()?;
+            Some(key_value_of(key, any_value(kv.get(span_record::VALUE)?)?))
         })
         .collect()
 }
@@ -271,11 +310,13 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
 /// `SPAN_KIND_INTERNAL`; `fill` sets the rest from wherever the record states it. `None` when
 /// `source` has no usable trace or span id.
 fn build(source: &Value, fill: impl FnOnce(&mut Span)) -> Option<Span> {
-    let trace_id = id(source.get("trace_id")?)?;
-    let span_id = id(source.get("span_id")?)?;
-    let parent = source.get("parent_span_id").and_then(id);
-    let mut trace = vec![0u8; 16];
-    trace[8..].copy_from_slice(&trace_id);
+    let trace_id = id(source.get(ExportField::TraceId.as_token())?)?;
+    let span_id = id(source.get(ExportField::SpanId.as_token())?)?;
+    let parent = source
+        .get(ExportField::ParentSpanId.as_token())
+        .and_then(id);
+    let mut trace = vec![0u8; TRACE_ID_BYTES];
+    trace[TRACE_ID_BYTES - RECORD_ID_BYTES..].copy_from_slice(&trace_id);
     let mut span = Span {
         trace_id: trace,
         span_id: span_id.to_vec(),
@@ -301,30 +342,35 @@ fn full_span(full: &Value) -> Option<Span> {
     };
     build(full, |span| {
         span.events = full
-            .get("events")
+            .get(span_record::EVENTS)
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .map(|e| Event {
-                time_unix_nano: ns(e, "time_ns"),
-                name: text(e, "name"),
-                attributes: key_values(e.get("attributes")),
+                time_unix_nano: ns(e, span_record::TIME_NS),
+                name: text(e, ExportField::Name.as_token()),
+                attributes: key_values(e.get(span_record::ATTRIBUTES)),
             })
             .collect();
-        let status = full.get("status");
-        let error = status.and_then(|s| s.get("code")).and_then(Value::as_str) == Some("error");
+        let status = full.get(span_record::STATUS);
+        let error = status
+            .and_then(|s| s.get(span_record::CODE))
+            .and_then(Value::as_str)
+            == Some(span_record::ERROR);
         span.status = Some(if error {
             Status {
-                message: status.map(|s| text(s, "message")).unwrap_or_default(),
+                message: status
+                    .map(|s| text(s, span_record::MESSAGE))
+                    .unwrap_or_default(),
                 code: STATUS_CODE_ERROR,
             }
         } else {
             Status::default()
         });
-        span.name = text(full, "name");
-        span.start_time_unix_nano = ns(full, "start_ns");
-        span.end_time_unix_nano = ns(full, "end_ns");
-        span.attributes = key_values(full.get("attributes"));
+        span.name = text(full, ExportField::Name.as_token());
+        span.start_time_unix_nano = ns(full, span_record::START_NS);
+        span.end_time_unix_nano = ns(full, span_record::END_NS);
+        span.attributes = key_values(full.get(span_record::ATTRIBUTES));
     })
 }
 
@@ -343,7 +389,7 @@ pub(crate) fn encode(spans: Vec<Span>) -> Option<Vec<u8>> {
     let request = ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
             resource: Some(Resource {
-                attributes: vec![key_value("service.name", SERVICE)],
+                attributes: vec![key_value(SERVICE_NAME_ATTRIBUTE, SERVICE)],
             }),
             scope_spans: vec![ScopeSpans {
                 scope: Some(InstrumentationScope {
@@ -369,14 +415,16 @@ pub(crate) fn span(record: &Value) -> Option<Span> {
     }
     let micros = |key: &str| record.get(key).and_then(Value::as_u64).unwrap_or_default();
     build(record, |span| {
-        let start = micros("start").saturating_mul(1000);
+        let start = micros(ExportField::Start.as_token()).saturating_mul(NANOS_PER_MICROSECOND);
         span.name = record
-            .get("name")
+            .get(ExportField::Name.as_token())
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
         span.start_time_unix_nano = start;
-        span.end_time_unix_nano = start.saturating_add(micros("duration_us").saturating_mul(1000));
+        span.end_time_unix_nano = start.saturating_add(
+            micros(ExportField::DurationUs.as_token()).saturating_mul(NANOS_PER_MICROSECOND),
+        );
         span.attributes = ATTRIBUTES
             .iter()
             .filter_map(|key| Some(key_value_of(key, any_value(record.get(*key)?)?)))
@@ -386,11 +434,13 @@ pub(crate) fn span(record: &Value) -> Option<Span> {
 
 /// A record's span id — 16 hex digits — as its 8 big-endian bytes; `None` when it is not one, or
 /// is zero (the invalid id in OTLP).
-fn id(value: &Value) -> Option<[u8; 8]> {
+fn id(value: &Value) -> Option<[u8; RECORD_ID_BYTES]> {
     let text = value.as_str()?;
-    if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if text.len() != RECORD_ID_HEX_DIGITS || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let n = u64::from_str_radix(text, 16).ok().filter(|n| *n != 0)?;
+    let n = u64::from_str_radix(text, HEX_RADIX)
+        .ok()
+        .filter(|n| *n != INVALID_RECORD_ID)?;
     Some(n.to_be_bytes())
 }
