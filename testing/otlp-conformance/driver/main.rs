@@ -28,11 +28,15 @@ fn main() {
         }
         Some("send") if args.len() == 4 => {
             let settings: OtlpSettings =
-                serde_json::from_value(serde_json::json!({ "url": args[2].as_str() })).expect("settings");
+                serde_json::from_value(serde_json::json!({ "url": args[2].as_str() }))
+                    .expect("settings");
             let endpoint = Endpoint::of(&settings);
             let payload = body(&std::fs::read(&args[3]).expect("read batch"));
             let (request, sealed) = endpoint.parts(payload);
-            assert!(sealed.is_empty(), "the suite's collector url carries no credential");
+            assert!(
+                sealed.is_empty(),
+                "the suite's collector url carries no credential"
+            );
             let collector = &endpoint.collector;
             let authority = collector
                 .split("://")
@@ -61,7 +65,11 @@ fn main() {
             let text = String::from_utf8_lossy(&reply);
             let status = text.lines().next().unwrap_or("");
             println!("{status}");
-            let code: u16 = status.split(' ').nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+            let code: u16 = status
+                .split(' ')
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0);
             std::process::exit(if (200..300).contains(&code) { 0 } else { 1 });
         }
         _ => {
