@@ -17,6 +17,20 @@ use opentelemetry_proto::tonic::trace::v1::{span::SpanKind, ResourceSpans, Scope
 use prost::Message as _;
 use serde_json::json;
 
+#[test]
+fn parseable_url_fragments_stay_out_of_diagnostics_even_when_echoed_separately() {
+    let url = "https://collector.example/v1/traces#fragment%2Dcredential";
+    assert!(ambiguous_url(url).is_none());
+    assert_eq!(log_target(url), "https://collector.example/v1/traces");
+    let endpoint = Endpoint::of(&OtlpSettings { url: url.into() });
+    assert!(!format!("{endpoint:?}").contains("fragment"));
+    let parts = secret_parts(url);
+    assert_eq!(
+        scrub("failure fragment%2Dcredential fragment-credential", &parts),
+        "failure *** ***"
+    );
+}
+
 fn kv(key: &str, value: &str) -> KeyValue {
     KeyValue {
         key: key.into(),
@@ -930,5 +944,31 @@ fn a_percent_encoded_credential_is_scrubbed_in_both_forms() {
             !out.contains("CANARY") && !out.contains("pw9"),
             "{text} -> {out}"
         );
+    }
+}
+
+#[test]
+fn identity_validation_preserves_uppercase_ids_and_omits_invalid_parents() {
+    for full in [false, true] {
+        for parent in ["0000000000000000", "short", "nothexnothexnotx", ""] {
+            let source = json!({
+                "trace_id": "00000000000000AB", "span_id": "00000000000000CD",
+                "parent_span_id": parent, "name": "identity"
+            });
+            let record = if full {
+                json!({"span": source})
+            } else {
+                source
+            };
+            let request =
+                decoded(&proto::export_request([&record]).expect("span survives invalid parent"));
+            let span = &request.resource_spans[0].scope_spans[0].spans[0];
+            assert_eq!(span.trace_id, [vec![0; 15], vec![0xab]].concat());
+            assert_eq!(span.span_id, [0, 0, 0, 0, 0, 0, 0, 0xcd]);
+            assert!(span.parent_span_id.is_empty());
+        }
+        let zero = json!({"trace_id":"00000000000000ab", "span_id":"0000000000000000"});
+        let zero = if full { json!({"span": zero}) } else { zero };
+        assert_eq!(proto::export_request([&zero]), None);
     }
 }

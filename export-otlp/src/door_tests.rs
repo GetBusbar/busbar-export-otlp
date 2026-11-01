@@ -96,8 +96,8 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
         lines,
         [(
             tracing::Level::WARN,
-            "OTLP span export failed; this batch was dropped".to_string(),
-            " diag=BUSBAR-7142 endpoint=https://a.example/v1/traces error=the egress class says no"
+            "OTLP span export was refused; this batch was dropped".to_string(),
+            " diag=BUSBAR-7142 endpoint=https://a.example/v1/traces error=\"the egress class says no\""
                 .to_string()
         )],
         "a stale refusal is one line naming the old endpoint, with no settling line"
@@ -388,12 +388,8 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
     // A count alone, with no message, is still a rejection.
     let lines = captured(|| otlp.settle(&run, &reply(partial_success_body(2, ""))));
     assert_eq!(lines.len(), 1, "{lines:?}");
-    // Nothing rejected, an empty body, and a body that is no response: silent successes.
-    for body in [
-        partial_success_body(0, ""),
-        Vec::new(),
-        b"\xff\xff not protobuf".to_vec(),
-    ] {
+    // Nothing rejected and an empty protobuf response are silent successes.
+    for body in [partial_success_body(0, ""), Vec::new()] {
         let lines = captured(|| otlp.settle(&run, &reply(body.clone())));
         assert!(lines.is_empty(), "{body:?}: {lines:?}");
     }
@@ -422,6 +418,245 @@ fn a_reply_past_the_bound_keeps_its_head_status() {
     assert!(delivered_past_bound(over(), None).is_err());
     let reset = Err(ConnFailure::Failed("connection reset".into()));
     assert!(delivered_past_bound(reset, Some(200)).is_err());
+}
+
+#[test]
+fn a_malformed_collector_response_warns_without_echoing_its_body() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://c.example/v1/traces");
+    for body in [b"<html>SECRETpw</html>".to_vec(), vec![0x0a, 0x80]] {
+        let lines = captured(|| {
+            otlp.settle(
+                &run,
+                &Ok(ExchangeResponse {
+                    status: 200,
+                    body,
+                    ..ExchangeResponse::default()
+                }),
+            );
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].0, tracing::Level::WARN);
+        assert_eq!(lines[0].1,
+            "OTLP collector reply is not a valid protobuf response; partial-success details are unavailable");
+        assert_eq!(
+            lines[0].2,
+            " endpoint=https://c.example/v1/traces status=200"
+        );
+        assert!(!format!("{lines:?}").contains("SECRETpw"));
+    }
+}
+
+#[test]
+fn an_oversized_success_warns_that_rejection_details_were_not_read() {
+    let lines = captured(|| {
+        let reply = super::delivered_past_bound(
+            Err(ConnFailure::Failed(super::REPLY_OVER_BOUND.into())),
+            Some(200),
+        )
+        .expect("preserve the collector status");
+        assert_eq!(reply.status, 200);
+        assert!(reply.body.is_empty());
+    });
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].0, tracing::Level::WARN);
+    assert_eq!(
+        lines[0].1,
+        "OTLP collector reply exceeded the body limit; partial-success details are unavailable"
+    );
+    assert_eq!(lines[0].2, " status=200 reply_limit=65536");
+}
+
+#[test]
+fn normalized_https_credentials_always_require_a_secured_connection() {
+    for url in [
+        "https://user:pass@collector.example/v1/traces",
+        "https:user:pass@collector.example/v1/traces",
+        " https://user:pass@collector.example/v1/traces",
+        "ht\ttps://user:pass@collector.example/v1/traces",
+    ] {
+        let endpoint = Endpoint::of(&crate::OtlpSettings { url: url.into() });
+        assert_eq!(endpoint.collector, "https://collector.example/v1/traces");
+        let cred = endpoint
+            .target
+            .authorization
+            .as_ref()
+            .expect("Basic credential");
+        assert!(cred.verify_eq(b"Basic dXNlcjpwYXNz"));
+        assert!(cred.secure_required(), "{url:?}");
+    }
+    let endpoint = Endpoint::of(&crate::OtlpSettings {
+        url: "http://user:pass@127.0.0.1:4318/v1/traces".into(),
+    });
+    assert!(!endpoint
+        .target
+        .authorization
+        .as_ref()
+        .expect("Basic")
+        .secure_required());
+}
+
+#[test]
+fn collector_message_cap_counts_characters_and_scrubs_before_truncating() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://opsuser:SECRETpassword@c.example/v1/traces");
+    for length in [255, 256, 257] {
+        let message = "é".repeat(length);
+        let lines = captured(|| {
+            otlp.settle(
+                &run,
+                &Ok(ExchangeResponse {
+                    status: 200,
+                    body: partial_success_body(1, &message),
+                    ..ExchangeResponse::default()
+                }),
+            )
+        });
+        let shown = if length > 256 {
+            format!("{}…", "é".repeat(256))
+        } else {
+            message
+        };
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].1,
+            format!("OTLP collector rejected part of this batch: {shown:?}")
+        );
+    }
+    let message = format!("{}SECRETpassword tail", "é".repeat(250));
+    let lines = captured(|| {
+        otlp.settle(
+            &run,
+            &Ok(ExchangeResponse {
+                status: 200,
+                body: partial_success_body(1, &message),
+                ..ExchangeResponse::default()
+            }),
+        )
+    });
+    let shown = format!("{}*** ta…", "é".repeat(250));
+    assert_eq!(
+        lines[0].1,
+        format!("OTLP collector rejected part of this batch: {shown:?}")
+    );
+}
+
+#[test]
+fn a_late_refusal_preserves_the_settled_admission_verdict() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    for admitted in [true, false] {
+        let (otlp, run) = admitted_run("https://c.example/v1/traces");
+        *run.admitted.lock().expect("lock") = Some(admitted);
+        for failure in [
+            ConnFailure::Refused("policy changed".into()),
+            ConnFailure::Unarmed,
+        ] {
+            let lines = captured(|| otlp.settle(&run, &Err(failure)));
+            assert_eq!(*run.admitted.lock().expect("lock"), Some(admitted));
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].0, tracing::Level::WARN);
+            assert!(!lines[0].1.contains("disabling"));
+            assert!(lines[0].1.contains("refused"), "{lines:?}");
+        }
+        // A later successful in-flight answer must not re-enable a disabled run either.
+        captured(|| {
+            otlp.settle(
+                &run,
+                &Ok(ExchangeResponse {
+                    status: 200,
+                    ..ExchangeResponse::default()
+                }),
+            )
+        });
+        assert_eq!(*run.admitted.lock().expect("lock"), Some(admitted));
+    }
+}
+
+#[test]
+fn host_errors_are_quoted_and_scrubbed() {
+    let url = "https://opsuser:SECRETpassword@c.example/v1/traces";
+    for first_refusal in [false, true] {
+        let otlp = Otlp {
+            run: RwLock::new(Otlp::start(Endpoint::of(&crate::OtlpSettings {
+                url: url.into(),
+            }))),
+        };
+        let run = otlp.run();
+        let message = format!("a\nFORGED {}SECRETpassword tail", "é".repeat(241));
+        let failure = if first_refusal {
+            ConnFailure::Refused(message)
+        } else {
+            ConnFailure::Failed(message)
+        };
+        let lines = captured(|| otlp.settle(&run, &Err(failure)));
+        assert_eq!(lines.len(), 1);
+        let rendered = format!("{}{}", lines[0].1, lines[0].2);
+        assert!(!rendered.contains('\n'), "{rendered:?}");
+        assert!(rendered.contains("a\\nFORGED"), "{rendered:?}");
+        assert!(!rendered.contains("SECRET"), "{rendered:?}");
+        let clean = format!("a\nFORGED {}*** tail", "é".repeat(241));
+        let expected = clean;
+        assert!(rendered.contains(&format!("{expected:?}")), "{rendered:?}");
+    }
+}
+
+#[test]
+fn admission_logs_allow_a_subscriber_to_inspect_the_same_run() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+    struct Inspect {
+        run: Arc<super::Run>,
+        unlocked: Arc<AtomicBool>,
+    }
+    impl Subscriber for Inspect {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, _: &Event<'_>) {
+            self.unlocked
+                .store(self.run.admitted.try_lock().is_ok(), Ordering::SeqCst);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    for result in [
+        Ok(ExchangeResponse {
+            status: 200,
+            ..ExchangeResponse::default()
+        }),
+        Err(ConnFailure::Unarmed),
+    ] {
+        let otlp = Otlp {
+            run: RwLock::new(Otlp::start(Endpoint::of(&crate::OtlpSettings {
+                url: "https://c.example/v1/traces".into(),
+            }))),
+        };
+        let run = otlp.run();
+        let unlocked = Arc::new(AtomicBool::new(false));
+        tracing::subscriber::with_default(
+            Inspect {
+                run: Arc::clone(&run),
+                unlocked: Arc::clone(&unlocked),
+            },
+            || {
+                otlp.settle(&run, &result);
+            },
+        );
+        assert!(
+            unlocked.load(Ordering::SeqCst),
+            "subscriber cannot inspect admission during its announcement"
+        );
+    }
 }
 
 /// RED before: the two skipped-line notices were debug, so at the default level a dropped line said

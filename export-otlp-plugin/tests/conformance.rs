@@ -762,8 +762,18 @@ fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
         open(&p, r#"{"url":"https://collector.example/big"}"#);
         deliver(&host, &p, &[record("0000000000000031", None)]);
         let lines = host.lines.0.lock().unwrap().clone();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("OTLP tracing enabled"), "{lines:?}");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("OTLP tracing enabled")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("1 ")
+                    && l.contains("partial-success details are unavailable")),
+            "{lines:?}"
+        );
 
         let q = load(&host, dropped);
         open(&q, r#"{"url":"https://collector.example/bigfail"}"#);
