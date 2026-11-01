@@ -441,7 +441,7 @@ fn a_malformed_collector_response_warns_without_echoing_its_body() {
             "OTLP collector reply is not a valid protobuf response; partial-success details are unavailable");
         assert_eq!(
             lines[0].2,
-            " endpoint=https://c.example/v1/traces status=200"
+            " diag=BUSBAR-7145 endpoint=https://c.example/v1/traces status=200"
         );
         assert!(!format!("{lines:?}").contains("SECRETpw"));
     }
@@ -464,7 +464,7 @@ fn an_oversized_success_warns_that_rejection_details_were_not_read() {
         lines[0].1,
         "OTLP collector reply exceeded the body limit; partial-success details are unavailable"
     );
-    assert_eq!(lines[0].2, " status=200 reply_limit=65536");
+    assert_eq!(lines[0].2, " diag=BUSBAR-7145 status=200 reply_limit=65536");
 }
 
 #[test]

@@ -36,7 +36,7 @@ use busbar_contract::abi::sdk::exchange::{
 };
 use busbar_contract::abi::sdk::export::{instance_names, second_instances, tail};
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
-use busbar_contract::abi::sdk::life::{settings_as, Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
@@ -352,7 +352,11 @@ pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
 fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
-    let settings: OtlpSettings = settings_as(settings)?;
+    let value = busbar_contract::abi::sdk::life::settings_value(settings)?;
+    #[cfg(test)]
+    crate::ownership_tests::watch_settings_value(&value);
+    let settings: OtlpSettings =
+        serde_json::from_value(value).map_err(|e| Refusal::failed(format!("settings: {e}")))?;
     if let Some(refusal) = crate::ambiguous_url(&settings.url) {
         return Err(Refusal::failed(refusal));
     }

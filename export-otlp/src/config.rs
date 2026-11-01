@@ -16,7 +16,15 @@ use serde::{Deserialize, Serialize};
 pub struct OtlpSettings {
     /// OTLP/HTTP traces endpoint URL (e.g. `http://localhost:4318/v1/traces`) — REQUIRED. When an
     /// `otlp` export instance is present busbar exports its spans there.
+    #[serde(deserialize_with = "url_string")]
     pub url: String,
+}
+
+fn url_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let url = String::deserialize(d)?;
+    #[cfg(test)]
+    crate::wipe_probe::watch("decoded settings url", url.as_bytes());
+    Ok(url)
 }
 
 impl std::fmt::Debug for OtlpSettings {

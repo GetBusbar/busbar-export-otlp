@@ -573,6 +573,165 @@ fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
         .collect()
 }
 
+/// Follow the host's parsed capability through the real export-instance queue, each door and the
+/// collector. The supplied full record is a protocol fixture; actual kernel tracing production
+/// additionally requires an assembled-product test.
+#[test]
+fn full_span_records_reach_the_collector_through_both_export_instances() {
+    use busbar_contract::export_calls::{Delivered, ExportCalls};
+    use busbar_plugin_loader::export_door::ExportInstance;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as AnyValue;
+
+    struct Completed(std::sync::mpsc::Sender<()>);
+    impl Drop for Completed {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    let full = json!({
+        "trace_id": "0000000000000011",
+        "span_id": "0000000000000012",
+        "parent_span_id": "0000000000000010",
+        "name": "forward",
+        "start_ns": 1_700_000_000_000_000_001u64,
+        "end_ns": 1_700_000_000_000_042_002u64,
+        "attributes": [
+            {"key": "pool", "value": "p1"},
+            {"key": "request_id", "value": "9007199254740993"},
+            {"key": "attempt", "value": 2},
+            {"key": "cached", "value": false},
+            {"key": "latency", "value": 1.25},
+            {"key": "retries", "value": ["a", "b"]}
+        ],
+        "events": [{
+            "name": "upstream refused",
+            "time_ns": 1_700_000_000_000_041_003u64,
+            "attributes": [{"key": "level", "value": "ERROR"}, {"key": "code", "value": 503}]
+        }],
+        "status": {"code": "error", "message": "upstream refused"}
+    });
+    let mut requests = Vec::new();
+    for dropped in [false, true] {
+        let host = Host::new();
+        let instance =
+            ExportInstance::open(load(&host, dropped), host.d.clone(), COLLECTOR.as_bytes())
+                .expect("open the real export instance");
+        assert!(
+            instance.takes_span_records(),
+            "the producer must receive the loaded door's full-span capability; dropped={dropped}"
+        );
+        // A projection that selects no normal span fields still carries the reserved member.
+        let line = serde_json::to_vec(&json!({"span": full})).unwrap();
+        let (done, completed) = std::sync::mpsc::channel();
+        assert!(matches!(
+            instance.deliver(ExportStream::Traces as u8, line, Box::new(Completed(done))),
+            Delivered::Queued
+        ));
+        completed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the queued batch answers");
+        let carried = host.collector.carried.lock().unwrap().clone();
+        let decoded = otlp_bodies(&json!({"carried": carried}));
+        assert_eq!(decoded.len(), 1, "one request; dropped={dropped}");
+        let request = &decoded[0];
+        let resource = &request.resource_spans[0];
+        assert_eq!(
+            resource.resource.as_ref().unwrap().attributes[0].key,
+            "service.name"
+        );
+        assert_eq!(
+            resource.resource.as_ref().unwrap().attributes[0]
+                .value
+                .as_ref()
+                .unwrap()
+                .value,
+            Some(AnyValue::StringValue("busbar".into()))
+        );
+        assert_eq!(
+            resource.scope_spans[0].scope.as_ref().unwrap().name,
+            "busbar"
+        );
+        let spans = &resource.scope_spans[0].spans;
+        assert_eq!(spans.len(), 1);
+        let span = &spans[0];
+        assert_eq!(hex(&span.trace_id), "00000000000000000000000000000011");
+        assert_eq!(hex(&span.span_id), "0000000000000012");
+        assert_eq!(hex(&span.parent_span_id), "0000000000000010");
+        assert_eq!(span.name, "forward");
+        assert_eq!(span.kind, 1);
+        assert_eq!(
+            span.start_time_unix_nano,
+            full["start_ns"].as_u64().unwrap()
+        );
+        assert_eq!(span.end_time_unix_nano, full["end_ns"].as_u64().unwrap());
+        let attributes: Vec<_> = span
+            .attributes
+            .iter()
+            .map(|kv| {
+                (
+                    kv.key.as_str(),
+                    kv.value.as_ref().unwrap().value.clone().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(attributes.len(), 6);
+        assert_eq!(
+            attributes[..5],
+            [
+                ("pool", AnyValue::StringValue("p1".into())),
+                (
+                    "request_id",
+                    AnyValue::StringValue("9007199254740993".into())
+                ),
+                ("attempt", AnyValue::IntValue(2)),
+                ("cached", AnyValue::BoolValue(false)),
+                ("latency", AnyValue::DoubleValue(1.25)),
+            ]
+        );
+        match &attributes[5].1 {
+            AnyValue::ArrayValue(values) => assert_eq!(
+                values
+                    .values
+                    .iter()
+                    .map(|v| v.value.clone().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    AnyValue::StringValue("a".into()),
+                    AnyValue::StringValue("b".into())
+                ]
+            ),
+            value => panic!("the array attribute changed type: {value:?}"),
+        }
+        assert_eq!(span.events.len(), 1);
+        let event = &span.events[0];
+        assert_eq!(event.name, "upstream refused");
+        assert_eq!(
+            event.time_unix_nano,
+            full["events"][0]["time_ns"].as_u64().unwrap()
+        );
+        assert_eq!(event.attributes.len(), 2);
+        assert_eq!(event.attributes[0].key, "level");
+        assert_eq!(event.attributes[1].key, "code");
+        assert_eq!(
+            event.attributes[0].value.as_ref().unwrap().value,
+            Some(AnyValue::StringValue("ERROR".into()))
+        );
+        assert_eq!(
+            event.attributes[1].value.as_ref().unwrap().value,
+            Some(AnyValue::IntValue(503))
+        );
+        assert_eq!(span.status.as_ref().unwrap().code, 2);
+        assert_eq!(span.status.as_ref().unwrap().message, "upstream refused");
+        requests.push(request.clone());
+        drop(instance);
+    }
+    assert_eq!(
+        requests[0], requests[1],
+        "linked and dropped doors preserve the same full record"
+    );
+}
+
 /// The linked and the dropped-in OTLP sink are ONE plugin: the same answers, the same requests to
 /// the collector, the same log — and the same image over another config is not (RED).
 #[test]

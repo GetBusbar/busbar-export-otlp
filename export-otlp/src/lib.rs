@@ -30,7 +30,24 @@
 //! One door, both ways in: [`door::door`] is the row a busbar build links, and the sibling
 //! `busbar-export-otlp-plugin` cdylib exports the same door as its one symbol.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![deny(unsafe_code)]
+
+#[cfg(test)]
+#[path = "tests/ownership_tests.rs"]
+mod ownership_tests;
+#[cfg(test)]
+#[allow(unsafe_code)]
+#[path = "tests/wipe_probe.rs"]
+mod wipe_probe;
+
+/// The parsed serialization is an owned allocation, separately from the settings text.
+fn parsed_url(text: &str) -> Result<url::Url, url::ParseError> {
+    let parsed = url::Url::parse(text)?;
+    #[cfg(test)]
+    crate::wipe_probe::watch("parsed url", parsed.as_str().as_bytes());
+    Ok(parsed)
+}
 
 pub mod config;
 pub mod door;
@@ -66,7 +83,7 @@ const OTLP_TRACES_PATH: &str = "/v1/traces";
 /// may ride in the path. A query becomes `?***` (`?api-key=`). A fragment is dropped. A string that
 /// is not a URL keeps only its scheme (see [`unparsed_target`]).
 pub fn log_target(url: &str) -> String {
-    let Ok(u) = url::Url::parse(url) else {
+    let Ok(u) = parsed_url(url) else {
         return unparsed_target(url);
     };
     // An ambiguous url (an `@` after its host) is refused at the door; were one to get here, its
@@ -101,7 +118,7 @@ pub fn log_target(url: &str) -> String {
 /// its path (unless OTLP's own), query and userinfo, each also percent-decoded; longest first.
 pub fn secret_parts(url: &str) -> Vec<String> {
     let mut parts = vec![url.to_string(), mask_url(url), split_credentials(url).0];
-    if let Ok(u) = url::Url::parse(url) {
+    if let Ok(u) = parsed_url(url) {
         if !matches!(u.path(), "" | "/" | OTLP_TRACES_PATH) {
             parts.push(u.path().to_string());
         }
@@ -117,6 +134,10 @@ pub fn secret_parts(url: &str) -> Vec<String> {
     parts.retain(|p| !p.is_empty());
     parts.sort_by_key(|p| std::cmp::Reverse(p.len()));
     parts.dedup();
+    #[cfg(test)]
+    for part in &parts {
+        crate::wipe_probe::watch("redaction part", part.as_bytes());
+    }
     parts
 }
 
@@ -148,7 +169,7 @@ fn unparsed_target(url: &str) -> String {
 /// `<scheme>:***` ([`unparsed_target`]): the parser's host of an ambiguous url is the front of the
 /// credential, so no part of the text is echoed. The words are the SDK's (`sdk::url::ambiguous_url`).
 pub fn ambiguous_url(url: &str) -> Option<String> {
-    let from_path = match url::Url::parse(url) {
+    let from_path = match parsed_url(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
         Err(_) if url.contains('@') => "@".to_string(),
         Err(_) => return None,
@@ -160,7 +181,7 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 /// base64(user:pass)))` — RFC 7617, the userinfo percent-decoded — or `(endpoint, None)` when it
 /// carries none or is not a URL. What the request carries never holds the secret in its target.
 pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
-    let Ok(mut parsed) = url::Url::parse(endpoint) else {
+    let Ok(mut parsed) = parsed_url(endpoint) else {
         // Not a URL the client can parse (any string is accepted as the url): no credential is
         // made of it, and its userinfo never reaches the host's dial target.
         return (cut_userinfo(endpoint, ""), None);
@@ -172,6 +193,8 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     else {
         return (endpoint.to_string(), None);
     };
+    #[cfg(test)]
+    crate::wipe_probe::watch("Basic value", authorization.as_bytes());
     let clean = if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
         let host = parsed.host_str().unwrap_or("");
         match parsed.port() {
@@ -187,7 +210,7 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
 /// The request target `endpoint` names: its path and query (`/` when it has no path), or `/` when
 /// it is not a URL.
 pub fn request_target(endpoint: &str) -> String {
-    match url::Url::parse(endpoint) {
+    match parsed_url(endpoint) {
         Ok(u) => {
             let target = &u[url::Position::BeforePath..url::Position::AfterQuery];
             if target.is_empty() { "/" } else { target }.to_string()
