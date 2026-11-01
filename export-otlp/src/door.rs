@@ -89,7 +89,7 @@ const TAIL: Tail = tail(STREAMS, &[]);
 // nothing; the sink receives the resolved string. (A plain comment: the macro takes no doc.)
 busbar_contract::statement_extensions!(EXTENSIONS: [
     (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
-    ("span_records", b"true"),
+    (busbar_contract::abi::mechanism::extensions::EXT_SPAN_RECORDS, b"true"),
 ]);
 
 /// The most deliveries one instance holds in flight; past it the host sheds the batch.
