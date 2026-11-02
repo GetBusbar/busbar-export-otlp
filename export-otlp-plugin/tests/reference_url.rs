@@ -9,7 +9,17 @@ use busbar_plugin_loader::dispatch::kinds::export::Export;
 use busbar_plugin_loader::dispatch::{
     load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, LinkedRow, NoSink, Plugin,
 };
-use busbar_test_kit::conformance::settings_as_the_kernel_resolves;
+fn settings_as_the_kernel_resolves(
+    plugin: &Plugin<Export>,
+    bytes: &[u8],
+    resolve: impl FnMut(&str, &busbar_contract::secret_ref::SecretRef) -> Result<String, String>,
+) -> Result<Vec<u8>, String> {
+    let mut value = serde_json::from_slice(bytes).map_err(|e| format!("settings JSON: {e}"))?;
+    busbar_contract::secret_fields::resolve_declared_fields(
+        &mut value, plugin.secret_refs(), plugin.reference_fields(), plugin.name(), resolve,
+    )?;
+    serde_json::to_vec(&value).map_err(|e| e.to_string())
+}
 
 const URL: &str = "https://collector.example:4318/v1/traces";
 

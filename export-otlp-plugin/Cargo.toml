@@ -36,12 +36,16 @@ busbar-export-otlp-plugin = { path = ".", features = ["dropped-in"] }
 # both through the one dispatcher — dev-only, never in the shipped artifact. Same pinned rev as the
 # logic crate's busbar-contract, so one busbar source resolves.
 busbar-plugin-loader = { workspace = true }
-busbar-test-kit = { workspace = true }
+busbar-core-connector = { workspace = true }
+busbar-kernel = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+rcgen = { workspace = true }
 serde_json = { workspace = true }
 # The OpenTelemetry project's own generated OTLP types, to decode what the host was asked to carry.
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true, features = ["default"] }
-# THE SUITE'S HOST CONNECTOR (tests/support/conformance_host.rs, busbar-test-kit's
-# `conformance_host!`): the transport framers this plugin's needs name. Dev-only.
+# The real connector uses the pinned TCP+HTTP doors in integration tests.
 busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }
