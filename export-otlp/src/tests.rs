@@ -121,8 +121,6 @@ fn a_root_span_has_no_parent_and_only_its_own_attributes() {
     );
 }
 
-/// AN ATTRIBUTE KEEPS ITS TYPE (busbar status row 173): a record's integer is an `int_value`
-
 #[test]
 fn an_attribute_keeps_the_type_the_record_states() {
     let record = json!({
@@ -150,8 +148,6 @@ fn an_attribute_keeps_the_type_the_record_states() {
         ]
     );
 }
-
-/// THE FULL SPAN RECORD (busbar status row 173): a line carrying the host's `span` member is
 
 #[test]
 fn a_full_span_record_is_the_span() {
@@ -229,7 +225,6 @@ fn a_full_span_record_is_the_span() {
     );
 }
 
-/// RED ARM: a record without a usable span identity is no span — nothing is encoded.
 #[test]
 fn a_record_without_a_span_identity_encodes_to_nothing() {
     for record in [
@@ -490,8 +485,6 @@ fn the_statement_marks_one_instance() {
     assert_eq!(door::STATEMENT.marks & MARK_ONE_INSTANCE, MARK_ONE_INSTANCE);
 }
 
-/// THE NEED IS HELD TO THE OPERATOR'S COLLECTOR (THE DESIGN §5, PB-100: "Every declared need is held
-
 #[test]
 fn the_need_is_pinned_to_the_url_setting() {
     assert_eq!(door::NEEDS.len(), 1);
@@ -501,8 +494,6 @@ fn the_need_is_pinned_to_the_url_setting() {
     assert_eq!(target.len, door::TARGET_FROM.len());
     assert!(!target.ptr.is_null());
 }
-
-/// NO COLLECTOR CREDENTIAL RENDERS THROUGH `Debug` (Q128 export-otlp LOW, reader r82 on ba8cf38):
 
 #[test]
 fn no_collector_credential_renders_through_debug() {
@@ -531,8 +522,6 @@ fn no_collector_credential_renders_through_debug() {
     }
 }
 
-/// A USERINFO's PERCENT-ESCAPED OCTETS REACH THE COLLECTOR AS THEY ARE (Q128 export-otlp LOW, reader
-
 #[test]
 fn a_userinfos_escaped_octets_reach_the_collector_as_they_are() {
     let (clean, auth) = crate::split_credentials("https://u:p%FFw@collector.example/v1/traces");
@@ -540,8 +529,6 @@ fn a_userinfos_escaped_octets_reach_the_collector_as_they_are() {
 
     assert_eq!(auth.as_deref(), Some("Basic dTpw/3c="));
 }
-
-/// A URL THAT DOES NOT PARSE STILL KEEPS ITS USERINFO OUT OF EVERY LINE AND THE DIAL TARGET (Q128
 
 #[test]
 fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
@@ -839,8 +826,6 @@ fn the_span_member_wins_over_projected_fields() {
     assert_eq!(span_of(&both).unwrap().name, "full");
 }
 
-/// RED before: a JSON null attribute value became the string "null" on the full-span path (the
-
 #[test]
 fn a_null_attribute_is_omitted_and_a_null_array_item_is_an_empty_any_value() {
     let span = span_of(&full(json!({
@@ -863,8 +848,6 @@ fn a_null_attribute_is_omitted_and_a_null_array_item_is_an_empty_any_value() {
     assert_eq!(array.values[1].value, None);
     assert!(span.events[0].attributes.is_empty(), "{:?}", span.events);
 }
-
-/// T2: `log_target`'s fall-through branches mask the credential: text with no `://` is
 
 #[test]
 fn log_target_masks_a_credential_in_its_fall_through_branches() {
@@ -893,8 +876,6 @@ fn log_target_masks_a_credential_in_its_fall_through_branches() {
     let shown = log_target(&format!("https://user:{KEY}/x@host:99999/p/{KEY}"));
     assert!(!shown.contains(KEY), "{shown}");
 }
-
-/// T2: a credential written percent-encoded (`p%40ss`) is scrubbed from a host failure text that
 
 #[test]
 fn a_percent_encoded_credential_is_scrubbed_in_both_forms() {

@@ -153,8 +153,6 @@ fn lines_for(url: &str) -> String {
     text
 }
 
-/// H3: the endpoint every line names kept the target's path and query, and the host's failure text
-
 #[test]
 fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
     for url in [
@@ -173,8 +171,6 @@ fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
         );
     }
 }
-
-/// RED before: a failed or non-2xx export was logged at DEBUG, so at the default level a lost batch
 
 #[test]
 fn a_dropped_export_is_a_warn_line() {
@@ -209,8 +205,6 @@ fn a_dropped_export_is_a_warn_line() {
     );
 }
 
-/// RED before: empty settings were refused as JSON that ended early ("EOF while parsing"), not for
-
 #[test]
 fn empty_settings_are_refused_for_the_missing_url() {
     use busbar_contract::abi::sdk::life::Life;
@@ -218,8 +212,6 @@ fn empty_settings_are_refused_for_the_missing_url() {
     assert_eq!(refusal.text(), Some("settings: missing field `url`"));
     assert!(Otlp::open(b"", &[], 1).is_err());
 }
-
-/// OWNER RULING 2026-10-24, RED before: a url that parses but reads its credential as host and
 
 #[test]
 fn an_ambiguous_url_is_refused_without_its_credential() {
@@ -252,8 +244,6 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
         assert!(Otlp::validate(settings.as_bytes()).is_ok(), "{url}");
     }
 }
-
-/// RED before: `serve` answered a bare REFUSED. It now says why, in the words every export sibling
 
 #[test]
 fn every_refusal_names_its_cause_through_the_door() {
@@ -304,8 +294,6 @@ fn every_refusal_names_its_cause_through_the_door() {
     assert_eq!(closed.outcome, Outcome::Ready);
 }
 
-/// RED before: a url the parser cannot parse at all (`svc:pa` is no port) skipped the ambiguity
-
 #[test]
 fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
     use busbar_contract::abi::sdk::life::Life;
@@ -349,8 +337,6 @@ fn admitted_run(url: &str) -> (Otlp, std::sync::Arc<super::Run>) {
     );
     (otlp, run)
 }
-
-/// RED before: a 2xx whose `partial_success` rejected spans dropped them without a word. It is one
 
 #[test]
 fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
@@ -648,8 +634,6 @@ fn admission_logs_allow_a_subscriber_to_inspect_the_same_run() {
     }
 }
 
-/// RED before: the two skipped-line notices were debug, so at the default level a dropped line said
-
 #[test]
 fn a_skipped_line_is_a_warn_line() {
     let lines = captured(|| {
@@ -708,8 +692,6 @@ fn a_batch_is_split_into_its_span_lines() {
     assert_eq!(batch_body(b"\n\r\n  \n"), None);
 }
 
-/// RED before: the collector's `partial_success` message was scrubbed with the url's parts alone, so
-
 #[test]
 fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -728,8 +710,6 @@ fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
         assert!(!text.contains(&token), "the token was logged: {text}");
     }
 }
-
-/// RED before: the collector's message was printed raw and whole (a newline forged a line, a long
 
 #[test]
 fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
@@ -891,14 +871,10 @@ fn the_basic_authorization_rides_sealed() {
     assert!(plain.target.authorization.is_none());
 }
 
-/// The Statement states the alias rewrite (`otlp`), the one source for both doors. RED before: it
-
 #[test]
 fn the_statement_states_its_alias_rewrite() {
     assert_eq!(super::STATEMENT.rewrites_len, 1);
 }
-
-/// RED before: the ambiguous-url refusal echoed everything after the last `@`, path and query
 
 #[test]
 fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
@@ -932,8 +908,6 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
         );
     }
 }
-
-/// RED before (HX-SLASHLESS): a url written without its slashes, or one the parser rejects, was
 
 #[test]
 fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
@@ -982,8 +956,6 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
     }
 }
 
-/// RED before: a 2xx whose `partial_success` rejected no span but carries an error message (the
-
 #[test]
 fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -1007,8 +979,6 @@ fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
         )]
     );
 }
-
-/// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the
 
 #[test]
 fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {

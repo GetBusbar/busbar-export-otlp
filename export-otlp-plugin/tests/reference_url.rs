@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `url` IS REFERENCE-CAPABLE, NOT SECRET (busbar lead ruling item 7a): a 1.5.5 config that
+//! The collector `url` accepts references resolved in place and literal URLs as non-secret settings.
 
 use std::sync::Arc;
 

@@ -912,7 +912,6 @@ fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
     }
 }
 
-/// RED: the door asked for as another kind is refused, by either origin, before any slot runs.
 #[test]
 fn a_wrong_kind_is_refused() {
     use busbar_contract::abi::mechanism::KindCode;
@@ -936,7 +935,6 @@ fn a_wrong_kind_is_refused() {
     );
 }
 
-/// RED: a manifest stating 1.5.5's export ABI (2) is refused before `dlopen` (THE DESIGN §11.8).
 #[test]
 fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
     let mut stated = row().statement;
@@ -1089,7 +1087,7 @@ busbar_test_kit::conformance_suite! {
     tls: conformance_host::anchors(),
 }
 
-/// The sink's declared secret fields, as the kernel resolves them (busbar #1699; OWNER RULING,
+/// The kernel resolves references at declared secret fields in place and refuses undeclared ones.
 
 mod declared_secrets {
     use std::sync::Arc;
