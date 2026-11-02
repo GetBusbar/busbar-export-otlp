@@ -956,19 +956,25 @@ fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
 /// RED: the door asked for as another kind is refused, by either origin, before any slot runs.
 #[test]
 fn a_wrong_kind_is_refused() {
+    use busbar_contract::abi::mechanism::KindCode;
+
     let host = Host::new();
+    let expected = LoadError::ManifestKind {
+        stated: KindCode::Export,
+        want: KindCode::Secret,
+    };
     let err = load_linked::<Secret>(&row(), host.bind())
         .expect_err("an export door is not a secret door");
-    assert!(
-        matches!(
-            err,
-            LoadError::WrongKind { .. } | LoadError::StatementMismatch
-        ),
-        "{err:?}"
+    assert_eq!(
+        err, expected,
+        "the linked rendering is rejected before entry"
     );
     let err = load_dropped::<Secret>(&cdylib(), &row().statement, host.bind())
         .expect_err("the dropped-in export door is not a secret door");
-    assert!(matches!(err, LoadError::ManifestKind { .. }), "{err:?}");
+    assert_eq!(
+        err, expected,
+        "the dropped rendering is rejected before entry"
+    );
 }
 
 /// RED: a manifest stating 1.5.5's export ABI (2) is refused before `dlopen` (THE DESIGN §11.8).
