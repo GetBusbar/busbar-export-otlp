@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE `traces` BATCH → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
+//! When a record carries a `span` object, `full_span` maps its nanosecond timestamps,
+//! events, status and typed attributes instead of the projected-field path.
 
 use busbar_contract::abi::export::ExportField;
 use prost::Message as _;
