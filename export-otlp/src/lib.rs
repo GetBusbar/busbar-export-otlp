@@ -7,6 +7,11 @@
 #![deny(unsafe_code)]
 
 #[cfg(test)]
+#[allow(unsafe_code)]
+#[path = "tests/abi.rs"]
+mod abi_tests_support;
+
+#[cfg(test)]
 #[path = "tests/ownership_tests.rs"]
 mod ownership_tests;
 #[cfg(test)]

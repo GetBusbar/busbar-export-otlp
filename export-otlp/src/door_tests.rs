@@ -244,51 +244,14 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
 
 #[test]
 fn every_refusal_names_its_cause_through_the_door() {
-    use super::NO_ROUTE;
-    use busbar_contract::abi::export::{slot as kind, Ops, ServeIn, ServeOut};
-    use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
-    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
-    use busbar_test_kit::test_support::reply::{call_in, close_in};
-    use busbar_test_kit::test_support::test_in::TestIn;
-    use busbar_test_kit::test_support::{zeroed, DoorView};
-
-    let view = DoorView::of(super::MACRO_DOOR);
-    let op =
-        |pick: fn(&'static Ops) -> &'static Option<busbar_contract::abi::mechanism::call::Op>| {
-            view.op::<Ops>(pick).expect("the slot is stated")
-        };
-    let head = || {
-        let mut h: OutHead = zeroed();
-        h.size = std::mem::size_of::<OutHead>() as u32;
-        h
-    };
-
-    let mut opened = call_in(
-        op(|t| &t.head.open),
-        None,
-        &TestIn::<OpenIn>::new()
-            .set(|i| &i.head.op, slot::OPEN)
-            .settings(br#"{"url":"https://c.example/v1/traces"}"#),
-        zeroed::<OpenOut>(),
-    );
-    assert_eq!(opened.outcome, Outcome::Ready);
-    let instance = opened.take_instance().expect("an instance");
-
-    let c = call_in(
-        op(|t| &t.serve),
-        Some(&instance),
-        &TestIn::<ServeIn>::new().set(|i| &i.head.op, kind::SERVE),
-        zeroed::<ServeOut>(),
-    );
-    assert_eq!(c.outcome, Outcome::Refused);
-    assert_eq!(c.error.as_deref(), Some(NO_ROUTE));
-    let closed = close_in(
-        op(|t| &t.head.close),
-        instance,
-        &TestIn::<InHead>::new().set(|i| &i.op, slot::CLOSE),
-        head(),
-    );
-    assert_eq!(closed.outcome, Outcome::Ready);
+    use crate::abi_tests_support::OtlpDoor;
+    use busbar_contract::abi::mechanism::call::Outcome;
+    let instance = OtlpDoor::open(br#"{"url":"https://c.example/v1/traces"}"#, None);
+    let answer = instance.serve();
+    assert_eq!(answer.outcome, Outcome::Refused);
+    assert_eq!(answer.error.as_deref(), Some(super::NO_ROUTE));
+    // Dropping the concrete instance crosses its actual CLOSE and asserts Ready.
+    drop(instance);
 }
 
 #[test]

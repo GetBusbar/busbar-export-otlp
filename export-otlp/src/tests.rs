@@ -543,144 +543,83 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
 /// A refresh that lands while a delivery is parked on the host must not let that delivery's answer
 #[test]
 fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
-    use busbar_contract::abi::export::{DeliverIn, Ops};
-    use busbar_contract::abi::host::conn::connector::EstablishIn;
-    use busbar_contract::abi::mechanism::call::{OutHead, Outcome, BLOB_JSONL, FLAG_RESUME};
-    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut, RefreshIn};
-    use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_test_kit::test_support::reply::{call_hosted_in, call_in};
-    use busbar_test_kit::test_support::test_in::TestIn;
-    use busbar_test_kit::test_support::{zeroed, DoorView};
+    use crate::abi_tests_support::{connector, host, OtlpDoor};
+    use busbar_contract::abi::host::service::ServiceOut;
+    use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, RawOutcome, FLAG_RESUME};
+    use busbar_contract::abi::mechanism::ticket::HostCtx;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
     static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);
-
-    /// The connector: the first ESTABLISH pends, every later one (the resume's included) is refused.
-    struct Connector;
-    impl FakeService for Connector {
-        type In = EstablishIn;
-        fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
-            if ESTABLISHES.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Outcome::Pending;
-            }
-            call.set_error("the test connector refuses this target");
+    #[allow(unsafe_code)]
+    extern "C" fn establish(
+        _: HostCtx,
+        _: *const std::ffi::c_void,
+        out: *mut ServiceOut,
+    ) -> RawOutcome {
+        let outcome = if ESTABLISHES.fetch_add(1, Ordering::SeqCst) == 0 {
+            Outcome::Pending
+        } else {
             Outcome::Refused
-        }
-    }
-
-    let batch = br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
-    let view = DoorView::of(door::MACRO_DOOR);
-    let op =
-        |pick: fn(&'static Ops) -> &'static Option<busbar_contract::abi::mechanism::call::Op>| {
-            view.op::<Ops>(pick).expect("the door states the slot")
         };
-    let host = FakeHost::new().serve(fake::conn::ESTABLISH, Connector);
-
-    let a = br#"{"url":"https://a.example/v1/traces"}"#;
-    let open_in = TestIn::<OpenIn>::new()
-        .set(|i| &i.head.op, slot::OPEN)
-        .settings(a);
-    let mut opened = call_hosted_in(
-        op(|t| &t.head.open),
-        None,
-        &host.lend_in(open_in),
-        zeroed::<OpenOut>(),
-    );
-    assert_eq!(opened.outcome, Outcome::Ready);
-    let instance = opened.take_instance().expect("open answered an instance");
-
-    let deliver_slot = op(|t| &t.deliver).index();
-    let deliver = |ticket: u32, flags: u32| {
-        let input = TestIn::<DeliverIn>::new()
-            .set(|i| &i.head.op, deliver_slot)
-            .set(|i| &i.head.flags, flags)
-            .set(
-                |i| &i.head.ticket,
-                Ticket {
-                    slot: ticket,
-                    generation: 1,
-                },
-            )
-            .blob(|i| &i.batch, batch, BLOB_JSONL);
-        call_in(
-            op(|t| &t.deliver),
-            Some(&instance),
-            &input,
-            zeroed::<OutHead>(),
-        )
-        .outcome
-    };
-
-    assert_eq!(deliver(1, 0), Outcome::Pending);
-
-    let b = br#"{"url":"https://b.example/v1/traces"}"#;
-    let refresh_in = TestIn::<RefreshIn>::new()
-        .set(|i| &i.head.op, slot::REFRESH)
-        .settings(b);
-    let refreshed = call_in(
-        op(|t| &t.head.refresh),
-        Some(&instance),
-        &refresh_in,
-        zeroed::<OutHead>(),
-    );
-    assert_eq!(refreshed.outcome, Outcome::Ready);
-
-    assert_eq!(deliver(1, FLAG_RESUME), Outcome::Ready);
-    assert_eq!(ESTABLISHES.load(Ordering::SeqCst), 2);
-
-    let _ = deliver(2, 0);
+        // SAFETY: the SDK lends the exclusively writable host service answer for this crossing.
+        let out = unsafe { &mut *out };
+        let error = "the test connector refuses this target";
+        if outcome == Outcome::Refused {
+            out.error = AbiStr {
+                ptr: error.as_ptr(),
+                len: error.len(),
+            };
+        }
+        out.outcome = RawOutcome::of(outcome);
+        out.outcome
+    }
+    let batch=br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
+    let conns = connector(establish);
+    let host = host(&conns);
+    let instance = OtlpDoor::open(br#"{"url":"https://a.example/v1/traces"}"#, Some(&host));
+    assert_eq!(instance.deliver(batch, 1, 0), Outcome::Pending);
     assert_eq!(
-        ESTABLISHES.load(Ordering::SeqCst),
-        3,
-        "a fresh delivery after the refresh reached the connector (the stale answer left the refreshed run open)"
+        instance
+            .refresh(br#"{"url":"https://b.example/v1/traces"}"#)
+            .outcome,
+        Outcome::Ready
     );
+    assert_eq!(instance.deliver(batch, 1, FLAG_RESUME), Outcome::Ready);
+    assert_eq!(ESTABLISHES.load(Ordering::SeqCst), 2);
+    let _ = instance.deliver(batch, 2, 0);
+    assert_eq!(ESTABLISHES.load(Ordering::SeqCst),3,"a fresh delivery after the refresh reached the connector (the stale answer left the refreshed run open)");
 }
 
-/// A refresh over settings that do not parse is refused in `validate`'s words and leaves the
+/// Bad refresh settings leave the previous run active, proven by its next actual connector call.
 #[test]
 fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
-    use busbar_contract::abi::export::{DeliverIn, Ops};
-    use busbar_contract::abi::host::conn::connector::EstablishIn;
-    use busbar_contract::abi::mechanism::call::{OutHead, Outcome, BLOB_JSONL};
-    use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut, RefreshIn};
-    use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_test_kit::test_support::reply::{call_hosted_in, call_in};
-    use busbar_test_kit::test_support::test_in::TestIn;
-    use busbar_test_kit::test_support::{zeroed, DoorView};
+    use crate::abi_tests_support::{connector, host, OtlpDoor};
+    use busbar_contract::abi::host::service::ServiceOut;
+    use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, RawOutcome};
+    use busbar_contract::abi::mechanism::ticket::HostCtx;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
     static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);
-
-    /// The connector: counts the dials it is asked for, refusing each.
-    struct Connector;
-    impl FakeService for Connector {
-        type In = EstablishIn;
-        fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
-            ESTABLISHES.fetch_add(1, Ordering::SeqCst);
-            call.set_error("the test connector refuses this target");
-            Outcome::Refused
-        }
+    #[allow(unsafe_code)]
+    extern "C" fn establish(
+        _: HostCtx,
+        _: *const std::ffi::c_void,
+        out: *mut ServiceOut,
+    ) -> RawOutcome {
+        ESTABLISHES.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the SDK lends this exclusively writable host service answer.
+        let out = unsafe { &mut *out };
+        let error = "the test connector refuses this target";
+        out.error = AbiStr {
+            ptr: error.as_ptr(),
+            len: error.len(),
+        };
+        out.outcome = RawOutcome::of(Outcome::Refused);
+        out.outcome
     }
-
-    let batch = br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
-    let view = DoorView::of(door::MACRO_DOOR);
-    let host = FakeHost::new().serve(fake::conn::ESTABLISH, Connector);
-    let good = br#"{"url":"https://a.example/v1/traces"}"#;
-    let open_in = TestIn::<OpenIn>::new()
-        .set(|i| &i.head.op, slot::OPEN)
-        .settings(good);
-    let open = view.op::<Ops>(|t| &t.head.open).expect("open");
-    let mut opened = call_hosted_in(open, None, &host.lend_in(open_in), zeroed::<OpenOut>());
-    assert_eq!(opened.outcome, Outcome::Ready);
-    let instance = opened.take_instance().expect("an instance");
-
-    let refresh = view.op::<Ops>(|t| &t.head.refresh).expect("refresh");
-    let refresh_in = TestIn::<RefreshIn>::new()
-        .set(|i| &i.head.op, slot::REFRESH)
-        .settings(b"{}");
-    let refreshed = call_in(refresh, Some(&instance), &refresh_in, zeroed::<OutHead>());
+    let batch=br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
+    let conns = connector(establish);
+    let host = host(&conns);
+    let instance = OtlpDoor::open(br#"{"url":"https://a.example/v1/traces"}"#, Some(&host));
+    let refreshed = instance.refresh(b"{}");
     assert_eq!(
         refreshed.outcome,
         Outcome::Failed,
@@ -690,20 +629,7 @@ fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
         refreshed.error.as_deref(),
         Some("settings: missing field `url`")
     );
-
-    let deliver = view.op::<Ops>(|t| &t.deliver).expect("deliver");
-    let deliver_in = TestIn::<DeliverIn>::new()
-        .set(|i| &i.head.op, deliver.index())
-        .set(
-            |i| &i.head.ticket,
-            Ticket {
-                slot: 1,
-                generation: 1,
-            },
-        )
-        .blob(|i| &i.batch, batch, BLOB_JSONL);
-    let delivered = call_in(deliver, Some(&instance), &deliver_in, zeroed::<OutHead>());
-    assert_eq!(delivered.outcome, Outcome::Ready);
+    assert_eq!(instance.deliver(batch, 1, 0), Outcome::Ready);
     assert_eq!(
         ESTABLISHES.load(Ordering::SeqCst),
         1,
