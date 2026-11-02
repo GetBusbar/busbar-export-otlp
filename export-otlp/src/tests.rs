@@ -348,7 +348,6 @@ fn the_request_target_is_the_path_and_query() {
     }
 }
 
-/// EOTLP-1: `from_str_radix` accepts a leading `+`, so `%+4` must stay literal (1.5.5 bytes).
 #[test]
 fn a_plus_after_percent_is_not_an_escape() {
     assert_eq!(percent_decode("ab%+41cd"), b"ab%+41cd");
