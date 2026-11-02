@@ -93,11 +93,14 @@ impl<'a> OtlpDoor<'a> {
         input.host = host.map_or(std::ptr::null(), std::ptr::from_ref);
         let mut out: OpenOut = blank_out();
         out.head.size = size_of::<OpenOut>() as u32;
-        let outcome = ops().head.open.expect("open")(
-            std::ptr::null_mut(),
-            (&input as *const OpenIn).cast(),
-            (&mut out as *mut OpenOut).cast(),
-        )
+        // SAFETY: the actual door receives live, correctly sized open frames and host loan.
+        let outcome = unsafe {
+            ops().head.open.expect("open")(
+                std::ptr::null_mut(),
+                (&input as *const OpenIn).cast(),
+                (&mut out as *mut OpenOut).cast(),
+            )
+        }
         .outcome();
         assert_eq!(outcome, Outcome::Ready);
         assert!(!out.instance.is_null());
@@ -117,11 +120,14 @@ impl<'a> OtlpDoor<'a> {
         };
         input.batch = blob(batch, BLOB_JSONL);
         let mut out = head();
-        ops().deliver.expect("deliver")(
-            self.instance,
-            (&input as *const DeliverIn).cast(),
-            (&mut out as *mut OutHead).cast(),
-        )
+        // SAFETY: this instance and its typed batch/output loans remain live for the crossing.
+        unsafe {
+            ops().deliver.expect("deliver")(
+                self.instance,
+                (&input as *const DeliverIn).cast(),
+                (&mut out as *mut OutHead).cast(),
+            )
+        }
         .outcome()
     }
     pub fn refresh(&self, settings: &[u8]) -> Answer {
@@ -130,11 +136,14 @@ impl<'a> OtlpDoor<'a> {
         input.head.size = size_of::<RefreshIn>() as u32;
         input.settings = blob(settings, BLOB_JSON);
         let mut out = head();
-        let outcome = ops().head.refresh.expect("refresh")(
-            self.instance,
-            (&input as *const RefreshIn).cast(),
-            (&mut out as *mut OutHead).cast(),
-        )
+        // SAFETY: the live instance receives correctly sized refresh and output frames.
+        let outcome = unsafe {
+            ops().head.refresh.expect("refresh")(
+                self.instance,
+                (&input as *const RefreshIn).cast(),
+                (&mut out as *mut OutHead).cast(),
+            )
+        }
         .outcome();
         answer(outcome, out)
     }
@@ -144,11 +153,14 @@ impl<'a> OtlpDoor<'a> {
         input.head.size = size_of::<ServeIn>() as u32;
         let mut out: ServeOut = blank_out();
         out.head.size = size_of::<ServeOut>() as u32;
-        let outcome = ops().serve.expect("serve")(
-            self.instance,
-            (&input as *const ServeIn).cast(),
-            (&mut out as *mut ServeOut).cast(),
-        )
+        // SAFETY: the live instance receives correctly sized ServeIn/ServeOut records.
+        let outcome = unsafe {
+            ops().serve.expect("serve")(
+                self.instance,
+                (&input as *const ServeIn).cast(),
+                (&mut out as *mut ServeOut).cast(),
+            )
+        }
         .outcome();
         answer(outcome, out.head)
     }
@@ -160,11 +172,14 @@ impl Drop for OtlpDoor<'_> {
         input.size = size_of::<InHead>() as u32;
         let mut out = head();
         assert_eq!(
-            ops().head.close.expect("close")(
-                self.instance,
-                (&input as *const InHead).cast(),
-                (&mut out as *mut OutHead).cast()
-            )
+            // SAFETY: this owner closes its actual door instance once with live typed frames.
+            unsafe {
+                ops().head.close.expect("close")(
+                    self.instance,
+                    (&input as *const InHead).cast(),
+                    (&mut out as *mut OutHead).cast(),
+                )
+            }
             .outcome(),
             Outcome::Ready
         );
