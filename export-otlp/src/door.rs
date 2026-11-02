@@ -210,11 +210,12 @@ impl Endpoint {
             body,
             timeout_ms: EXPORT_TIMEOUT_MS,
         };
+        let at = request.fields.len();
         let sealed = self
             .target
             .authorization
             .iter()
-            .map(|c| (1, AUTHORIZATION_FIELD.to_vec(), c.field()))
+            .map(|c| (at, AUTHORIZATION_FIELD.to_vec(), c.field()))
             .collect();
         (request, sealed)
     }
