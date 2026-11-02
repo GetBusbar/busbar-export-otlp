@@ -599,10 +599,10 @@ fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
     use busbar_contract::abi::mechanism::call::{OutHead, Outcome, BLOB_JSONL, FLAG_RESUME};
     use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut, RefreshIn};
     use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_contract::abi::sdk::test_support::reply::{call_hosted_in, call_in};
-    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
-    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_test_kit::test_support::reply::{call_hosted_in, call_in};
+    use busbar_test_kit::test_support::test_in::TestIn;
+    use busbar_test_kit::test_support::{zeroed, DoorView};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);
@@ -700,10 +700,10 @@ fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
     use busbar_contract::abi::mechanism::call::{OutHead, Outcome, BLOB_JSONL};
     use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut, RefreshIn};
     use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_contract::abi::sdk::test_support::reply::{call_hosted_in, call_in};
-    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
-    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_test_kit::test_support::reply::{call_hosted_in, call_in};
+    use busbar_test_kit::test_support::test_in::TestIn;
+    use busbar_test_kit::test_support::{zeroed, DoorView};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);

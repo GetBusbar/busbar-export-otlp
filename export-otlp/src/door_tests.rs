@@ -266,9 +266,9 @@ fn every_refusal_names_its_cause_through_the_door() {
     use busbar_contract::abi::export::{slot as kind, Ops, ServeIn, ServeOut};
     use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
     use busbar_contract::abi::mechanism::lifecycle::{slot, OpenIn, OpenOut};
-    use busbar_contract::abi::sdk::test_support::reply::{call_in, close_in};
-    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
-    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use busbar_test_kit::test_support::reply::{call_in, close_in};
+    use busbar_test_kit::test_support::test_in::TestIn;
+    use busbar_test_kit::test_support::{zeroed, DoorView};
 
     let view = DoorView::of(super::MACRO_DOOR);
     let op =
