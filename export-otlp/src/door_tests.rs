@@ -61,7 +61,6 @@ fn captured(f: impl FnOnce()) -> Vec<(tracing::Level, String, String)> {
 }
 
 /// A line that is not JSON is logged as such, not as a record with no span identity; JSON without
-
 #[test]
 fn a_line_that_is_not_json_is_logged_as_not_json() {
     let batch = b"this is not json\n{\"name\":\"json without ids\"}\n";
@@ -78,7 +77,6 @@ fn a_line_that_is_not_json_is_logged_as_not_json() {
 }
 
 /// A answer for a run a refresh replaced settles nothing and speaks only of that old run: the
-
 #[test]
 fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
     let at = |url: &str| Endpoint::of(&crate::OtlpSettings { url: url.into() });
@@ -116,7 +114,6 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
 const CANARY: &str = "CANARY5e81bc";
 
 /// Every line logged while one instance's exports are carried, refused and dropped, for a target
-
 fn lines_for(url: &str) -> String {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let settings = crate::OtlpSettings {
@@ -305,7 +302,6 @@ fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
 }
 
 /// An `ExportTraceServiceResponse` body carrying `partial_success`, encoded by the OpenTelemetry
-
 fn partial_success_body(rejected_spans: i64, error_message: &str) -> Vec<u8> {
     use opentelemetry_proto::tonic::collector::trace::v1::{
         ExportTracePartialSuccess, ExportTraceServiceResponse,
@@ -372,7 +368,6 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
 }
 
 /// A reply whose body passes the bound fails the exchange after its head; the batch reached the
-
 #[test]
 fn a_reply_past_the_bound_keeps_its_head_status() {
     use super::{delivered_past_bound, REPLY_OVER_BOUND};
@@ -668,7 +663,6 @@ fn span_ids(body: &[u8]) -> Vec<u64> {
 }
 
 /// Two valid lines are two spans, in order; a valid line after a non-JSON one is still exported;
-
 #[test]
 fn a_batch_is_split_into_its_span_lines() {
     let (a, b, c) = (line(1), line(2), line(3));
@@ -740,7 +734,6 @@ fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
 }
 
 /// The disabling line and the two skipped-record lines carry their catalogue codes (7140, 7144);
-
 #[test]
 fn the_disabling_and_skipped_record_lines_carry_their_codes() {
     let settings = crate::OtlpSettings {
@@ -768,7 +761,6 @@ fn the_disabling_and_skipped_record_lines_carry_their_codes() {
 }
 
 /// Every code the declaration states is raised on a line, and the declaration states exactly the
-
 #[test]
 fn every_declared_code_is_on_a_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -840,7 +832,6 @@ fn every_declared_code_is_on_a_line() {
 }
 
 /// The Basic `Authorization` rides sealed: the framed head shows `<sealed>` for it (the SDK frames
-
 #[test]
 fn the_basic_authorization_rides_sealed() {
     let endpoint = Endpoint::of(&crate::OtlpSettings {

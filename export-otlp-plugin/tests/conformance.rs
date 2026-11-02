@@ -47,7 +47,6 @@ const PLAINTEXT: &str = r#"{"url":"http://collector.example/v1/traces"}"#;
 const MOVED: &str = r#"{"url":"http://127.0.0.1:4318/v2/traces"}"#;
 
 /// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-
 fn cdylib() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary has a path");
     let profile = exe
@@ -526,7 +525,6 @@ fn transcript(dropped: bool, settings: &str) -> Value {
 }
 
 /// Every body the collector was handed, decoded by the publisher's types — and re-encoded to the
-
 fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
     run["carried"]
         .as_array()
@@ -546,7 +544,6 @@ fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
 }
 
 /// Follow the host's parsed capability through the real export-instance queue, each door and the
-
 #[test]
 fn full_span_records_reach_the_collector_through_both_export_instances() {
     use busbar_contract::export_calls::{Delivered, ExportCalls};
@@ -704,7 +701,6 @@ fn full_span_records_reach_the_collector_through_both_export_instances() {
 }
 
 /// The linked and the dropped-in OTLP sink are ONE plugin: the same answers, the same requests to
-
 #[test]
 fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     let linked = transcript(false, COLLECTOR);
@@ -871,7 +867,6 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
 }
 
 /// THE REPLY BOUND, end to end through the host's connector: a 2xx reply whose 80 KB body (read
-
 #[test]
 fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
     for dropped in [false, true] {
@@ -950,7 +945,6 @@ fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
 }
 
 /// `check` at `phase` over instances named `names`, through the slot: the call's outcome and the
-
 fn check_through_the_door(
     p: &Plugin<Export>,
     phase: u32,
@@ -983,7 +977,6 @@ fn check_through_the_door(
 }
 
 /// THE LIMITS-PHASE CHECK, DRIVEN THROUGH THE DOOR: with two instances at the limits phase the sink
-
 #[test]
 fn the_limits_check_refuses_a_second_instance_through_the_door() {
     let expected = serde_json::to_string(&busbar_contract::abi::sdk::export::second_instances(
@@ -1019,7 +1012,6 @@ fn the_limits_check_refuses_a_second_instance_through_the_door() {
 }
 
 /// THE NEED IS PINNED TO THE `url` SETTING, read from the Statement the door states: the target
-
 #[test]
 fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
     use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, KEEP_NAMED};
@@ -1038,7 +1030,6 @@ fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
 }
 
 /// THE STATEMENT STATES THE ALIAS REWRITE: one rewrite, of the alias class, from the module name
-
 #[test]
 fn the_statement_states_the_otlp_alias_rewrite() {
     use busbar_contract::abi::mechanism::door::REWRITE_ALIAS;
@@ -1055,7 +1046,6 @@ fn the_statement_states_the_otlp_alias_rewrite() {
 mod conformance_host;
 
 /// The collector's answer: an HTTP/1.1 `200` (an empty OTLP response) once a whole request (its
-
 fn collected(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -1088,7 +1078,6 @@ busbar_test_kit::conformance_suite! {
 }
 
 /// The kernel resolves references at declared secret fields in place and refuses undeclared ones.
-
 mod declared_secrets {
     use std::sync::Arc;
 

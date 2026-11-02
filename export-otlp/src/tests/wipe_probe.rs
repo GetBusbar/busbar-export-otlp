@@ -148,7 +148,6 @@ fn observe(address: usize, len: usize, allocation_size: usize) -> Observation {
 }
 
 /// Register only an initialized Vec/String/OsString byte payload, at its allocation's start.
-
 pub(super) fn watch(label: &'static str, bytes: &[u8]) {
     if bytes.is_empty() {
         return;

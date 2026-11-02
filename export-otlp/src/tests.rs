@@ -61,7 +61,6 @@ fn expected(span: Span) -> ExportTraceServiceRequest {
 }
 
 /// Decode `bytes` with the OpenTelemetry project's own types, and require that re-encoding the
-
 fn decoded(bytes: &[u8]) -> ExportTraceServiceRequest {
     let request = ExportTraceServiceRequest::decode(bytes).expect("an OTLP request");
     assert_eq!(request.encode_to_vec(), bytes, "the canonical encoding");
@@ -103,7 +102,6 @@ fn a_traces_record_is_one_otlp_span_every_field_in_its_place() {
 }
 
 /// A root span carries no parent and only the attributes it has; an empty attribute value is
-
 #[test]
 fn a_root_span_has_no_parent_and_only_its_own_attributes() {
     let record = json!({
@@ -243,7 +241,6 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
 }
 
 /// A batch is ONE request: each record that is a span, in batch order; a record that is none adds
-
 #[test]
 fn a_batch_is_one_request_carrying_each_span_in_order() {
     let records = [
@@ -288,7 +285,6 @@ fn settings_refuse_in_the_grammars_words() {
 }
 
 /// A delivery POSTs the batch's OTLP request — binary, to the endpoint's path, the userinfo riding
-
 #[test]
 fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
     let endpoint = Endpoint::of(
@@ -385,7 +381,6 @@ fn the_small_encoders_match_their_standards() {
 }
 
 /// The credential split (moved with the exporter from busbar's composition root, K9e-2): whatever
-
 #[test]
 fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
     let cases = [
@@ -434,7 +429,6 @@ fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
 }
 
 /// A password with an unescaped `/`, `?` or `#` makes the url unparsable (the text before it reads as
-
 #[test]
 fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
     for (url, secret) in [
@@ -459,7 +453,6 @@ fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
 }
 
 /// THE ONE-INSTANCE REFUSAL, byte for byte the line busbar 1.5.5's `--validate` printed for a second
-
 #[test]
 fn a_second_instance_is_refused_in_1_5_5_words() {
     let check_limits = |names: &[String]| second_instances(names, ALIAS, ONE_INSTANCE);
@@ -477,7 +470,6 @@ fn a_second_instance_is_refused_in_1_5_5_words() {
 }
 
 /// The sink states the `one_instance` mark, which is what makes the host ask its limits check while
-
 #[test]
 fn the_statement_marks_one_instance() {
     use busbar_contract::abi::mechanism::door::MARK_ONE_INSTANCE;
@@ -549,7 +541,6 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
 }
 
 /// A refresh that lands while a delivery is parked on the host must not let that delivery's answer
-
 #[test]
 fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
     use busbar_contract::abi::export::{DeliverIn, Ops};
@@ -647,7 +638,6 @@ fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
 }
 
 /// A refresh over settings that do not parse is refused in `validate`'s words and leaves the
-
 #[test]
 fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
     use busbar_contract::abi::export::{DeliverIn, Ops};
@@ -739,7 +729,6 @@ fn full(extra: serde_json::Value) -> serde_json::Value {
 }
 
 /// A full span record's status: absent and `unset` are the empty status (code 0, no message); an
-
 #[test]
 fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
     let status =
@@ -755,7 +744,6 @@ fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
 }
 
 /// Real ids are high-entropy: the 16 hex digits are the exact 8 big-endian bytes (the trace id
-
 #[test]
 fn high_entropy_ids_encode_to_their_exact_bytes() {
     let tail = [0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
@@ -781,7 +769,6 @@ fn high_entropy_ids_encode_to_their_exact_bytes() {
 }
 
 /// Projected-attribute edges: a JSON null is no attribute; an integer past `i64::MAX` is an
-
 #[test]
 fn projected_attribute_and_time_edges() {
     let record = json!({
@@ -808,7 +795,6 @@ fn projected_attribute_and_time_edges() {
 }
 
 /// The `span` member wins: malformed ids in it are no span even beside valid projected ids; with
-
 #[test]
 fn the_span_member_wins_over_projected_fields() {
     let bad = json!({

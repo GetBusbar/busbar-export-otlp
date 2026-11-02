@@ -33,7 +33,6 @@ const HEX_RADIX: u32 = 16;
 const INVALID_RECORD_ID: u64 = 0;
 
 /// Full-span JSON vocabulary emitted by busbar-kernel's export/traces.rs
-
 mod span_record {
     pub(super) const KEY: &str = "key";
     pub(super) const VALUE: &str = "value";
@@ -133,7 +132,6 @@ struct ExportTracePartialSuccess {
 }
 
 /// What a collector's 2xx body says it rejected: `Some((rejected_spans, error_message))` when its
-
 pub fn rejected(body: &[u8]) -> Option<(i64, String)> {
     collector_response(body).ok().flatten()
 }
@@ -177,7 +175,6 @@ struct Status {
 const STATUS_CODE_ERROR: i32 = 2;
 
 /// The reserved member of a `traces` line carrying the full span record (the host hands it to a
-
 pub const SPAN_MEMBER: &str = "span";
 
 /// `ArrayValue` (common/v1).
@@ -234,7 +231,6 @@ fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
 }
 
 /// A record value as its `AnyValue` member, typed as the record states it (as the previous
-
 fn any_value(value: &Value) -> Option<AnyValueKind> {
     Some(match value {
         Value::Null => return None,
@@ -270,7 +266,6 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
 }
 
 /// The one `Span` builder: the ids a record (or a full span record) states, as `source` carries
-
 fn build(source: &Value, fill: impl FnOnce(&mut Span)) -> Option<Span> {
     let trace_id = id(source.get(ExportField::TraceId.as_token())?)?;
     let span_id = id(source.get(ExportField::SpanId.as_token())?)?;
@@ -291,7 +286,6 @@ fn build(source: &Value, fill: impl FnOnce(&mut Span)) -> Option<Span> {
 }
 
 /// The full span record as its `Span`: its ids and name, its start and end
-
 fn full_span(full: &Value) -> Option<Span> {
     let ns = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or_default();
     let text = |v: &Value, key: &str| {
@@ -335,13 +329,11 @@ fn full_span(full: &Value) -> Option<Span> {
 }
 
 /// The encoded `ExportTraceServiceRequest` carrying each of `records` that is a span, in order, or
-
 pub fn export_request<'a>(records: impl IntoIterator<Item = &'a Value>) -> Option<Vec<u8>> {
     encode(records.into_iter().filter_map(span).collect())
 }
 
 /// The encoded `ExportTraceServiceRequest` carrying `spans` (each built once by [`span`]), or `None`
-
 pub(crate) fn encode(spans: Vec<Span>) -> Option<Vec<u8>> {
     if spans.is_empty() {
         return None;
@@ -368,7 +360,6 @@ pub fn is_span(record: &Value) -> bool {
 }
 
 /// The record's `Span` message: from its full span record where the host handed one (its `span`
-
 pub(crate) fn span(record: &Value) -> Option<Span> {
     if let Some(full) = record.get(SPAN_MEMBER).filter(|v| v.is_object()) {
         return full_span(full);
@@ -393,7 +384,6 @@ pub(crate) fn span(record: &Value) -> Option<Span> {
 }
 
 /// A record's span id — 16 hex digits — as its 8 big-endian bytes; `None` when it is not one, or
-
 fn id(value: &Value) -> Option<[u8; RECORD_ID_BYTES]> {
     let text = value.as_str()?;
     if text.len() != RECORD_ID_HEX_DIGITS || !text.bytes().all(|b| b.is_ascii_hexdigit()) {

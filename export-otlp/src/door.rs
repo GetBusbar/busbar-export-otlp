@@ -37,7 +37,6 @@ pub(crate) const TARGET_FROM: &str = "settings.url";
 pub const NEED: u32 = 0;
 
 /// The collector, reached through the host: framed `http`, under the `loopback-allowed` egress class
-
 pub(crate) const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_LOOPBACK_ALLOWED,
@@ -86,7 +85,6 @@ pub const STATEMENT: Statement = Statement {
 };
 
 /// The catalogue codes the sink's lines carry (`declares.json`): the exporter disabled because the
-
 const DISABLED: &str = "BUSBAR-7140";
 const NON_2XX: &str = "BUSBAR-7141";
 const TRANSPORT_FAILURE: &str = "BUSBAR-7142";
@@ -182,7 +180,6 @@ impl Endpoint {
     }
 
     /// The request carrying `body` to this endpoint, and the sealed fields it carries beside it
-
     #[must_use]
     pub fn parts(&self, body: Vec<u8>) -> (Request, Vec<SealedField>) {
         let request = Request {
@@ -207,7 +204,6 @@ impl Endpoint {
 
 impl Endpoint {
     /// The exchange carrying `body` to this endpoint, framed.
-
     pub fn exchange(&self, body: Vec<u8>) -> Result<Exchange, ConnFailure> {
         let (request, sealed) = self.parts(body);
         Exchange::request_sealed(request, sealed)
@@ -224,7 +220,6 @@ struct Run {
 }
 
 /// A delivery parked on the host: its exchange, and the run it was framed for, so its answer is
-
 struct Parked {
     exchange: Exchange,
     run: Arc<Run>,
@@ -256,7 +251,6 @@ impl Otlp {
     }
 
     /// What became of one export framed for `run`. A refresh since then makes the answer a stale
-
     fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
         let stale = !Arc::ptr_eq(run, &self.run());
         run.settle(stale, result);
@@ -265,13 +259,11 @@ impl Otlp {
 
 impl Run {
     /// Whether the host refused this run's exports: its connector refused the first one (the
-
     fn refused(&self) -> bool {
         *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) == Some(false)
     }
 
     /// What became of one export: the first answer the host gives settles whether this run takes
-
     fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
         let shown = self.endpoint.shown.as_str();
         let secrets = self.endpoint.secrets.as_slice();
@@ -351,7 +343,6 @@ impl Run {
 }
 
 /// The error text of the door's REFUSED answer to `deliver` or `check` on no opened instance, so
-
 pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
@@ -389,7 +380,6 @@ impl Life for Otlp {
 }
 
 /// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped: the
-
 pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
     let mut spans = Vec::new();
     for line in batch
@@ -487,7 +477,6 @@ fn capped(text: &str) -> String {
 }
 
 /// A reply whose body passed [`REPLY_LIMIT`] fails the exchange ([`REPLY_OVER_BOUND`]) after its
-
 fn delivered_past_bound(
     result: Result<ExchangeResponse, ConnFailure>,
     head_status: Option<u16>,
@@ -512,7 +501,6 @@ fn delivered_past_bound(
 }
 
 /// The line an export that did not reach the collector writes, the host's text cut of the target's
-
 fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
     let message = failure_text(error, secrets);
     if matches!(error, ConnFailure::Refused(_) | ConnFailure::Unarmed) {
@@ -538,7 +526,6 @@ fn failure_text(error: &ConnFailure, secrets: &[String]) -> String {
 }
 
 /// `check`: at the limits phase, a refusal of every instance after the first
-
 pub struct Check;
 
 impl SafeSlot for Check {

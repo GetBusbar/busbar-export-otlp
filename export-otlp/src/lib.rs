@@ -33,7 +33,6 @@ pub use config::OtlpSettings;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Why a second instance is refused, the tail of the limits check's line
-
 pub const ONE_INSTANCE: &str =
     "OTLP installs the ONE process-global tracer subscriber, so a second \
      instance could only be silently ignored — keep a single instance.";
@@ -53,7 +52,6 @@ pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
 const OTLP_TRACES_PATH: &str = "/v1/traces";
 
 /// `url` as a log line or `Debug` names it: scheme, a masked userinfo, host
-
 pub fn log_target(url: &str) -> String {
     let Ok(u) = parsed_url(url) else {
         return unparsed_target(url);
@@ -85,7 +83,6 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// The parts of `url` that can carry a credential, as [`scrub`] cuts them from foreign text: the URL
-
 pub fn secret_parts(url: &str) -> Vec<String> {
     let (clean, mut unused_authorization) = split_credentials(url);
     unused_authorization.zeroize();
@@ -124,14 +121,12 @@ pub fn secret_parts(url: &str) -> Vec<String> {
 }
 
 /// `text` (the host's failure words, which may quote the target) with each of `parts`
-
 #[must_use]
 pub fn scrub(text: &str, parts: &[String]) -> String {
     sdk_url::scrub(text, parts.to_vec(), false)
 }
 
 /// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
-
 fn unparsed_target(url: &str) -> String {
     let scheme = url
         .split_once(':')
@@ -141,7 +136,6 @@ fn unparsed_target(url: &str) -> String {
 }
 
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` carries an `@` after its host —
-
 pub fn ambiguous_url(url: &str) -> Option<String> {
     let from_path = Zeroizing::new(match parsed_url(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
@@ -152,7 +146,6 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
-
 pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     let Ok(parsed) = parsed_url(endpoint) else {
         return (cut_userinfo(endpoint, ""), None);
@@ -183,7 +176,6 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
 }
 
 /// The request target `endpoint` names: its path and query (`/` when it has no path), or `/` when
-
 pub fn request_target(endpoint: &str) -> String {
     match parsed_url(endpoint) {
         Ok(u) => {
@@ -201,7 +193,6 @@ fn percent_decode(s: &str) -> Vec<u8> {
 }
 
 /// Standard base64 (RFC 4648 §4, `=`-padded) through the `base64` crate: the suite's independent
-
 #[cfg(test)]
 fn base64(input: &[u8]) -> String {
     use base64::Engine as _;
