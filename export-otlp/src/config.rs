@@ -2,10 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `settings:` of an `export.<name>.module: otlp` instance. The same serde the host's
-//! configuration grammar uses, so a settings error reads the same
-//! (`export.<name>.settings: unknown field …` / `missing field `url``). The door reads them through
-//! `busbar_contract::abi::sdk::life::settings_as` (empty settings are `{}`, so they are refused for
-//! the missing `url`, not as JSON that ended early).
 
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};

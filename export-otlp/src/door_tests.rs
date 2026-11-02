@@ -61,7 +61,7 @@ fn captured(f: impl FnOnce()) -> Vec<(tracing::Level, String, String)> {
 }
 
 /// A line that is not JSON is logged as such, not as a record with no span identity; JSON without
-/// ids keeps the identity line. RED before the fix: both lines said "no span identity".
+
 #[test]
 fn a_line_that_is_not_json_is_logged_as_not_json() {
     let batch = b"this is not json\n{\"name\":\"json without ids\"}\n";
@@ -78,8 +78,7 @@ fn a_line_that_is_not_json_is_logged_as_not_json() {
 }
 
 /// A answer for a run a refresh replaced settles nothing and speaks only of that old run: the
-/// connector's refusal of a parked delivery writes neither the "disabling OTLP trace export" line
-/// nor the "OTLP tracing enabled" line, and the dropped-export line names the OLD endpoint.
+
 #[test]
 fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
     let at = |url: &str| Endpoint::of(&crate::OtlpSettings { url: url.into() });
@@ -109,17 +108,15 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
                 || m.contains("OTLP tracing enabled")),
         "a stale answer must not write a settling line"
     );
-    // Neither run was settled by it.
+
     assert_eq!(*parked.admitted.lock().expect("lock"), None);
     assert!(!otlp.run().refused());
 }
 
-// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H3) ────────────────────────────────────────────
-
 const CANARY: &str = "CANARY5e81bc";
 
 /// Every line logged while one instance's exports are carried, refused and dropped, for a target
-/// whose query and path carry a key, with the host's text quoting the target back.
+
 fn lines_for(url: &str) -> String {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let settings = crate::OtlpSettings {
@@ -133,7 +130,7 @@ fn lines_for(url: &str) -> String {
     };
     let echo = format!("error sending request for url ({url}): connection reset");
     let mut all = Vec::new();
-    // One run admitted, then a non-2xx and a host failure that quotes the URL.
+
     let otlp = Otlp {
         run: RwLock::new(Otlp::start(Endpoint::of(&settings))),
     };
@@ -143,7 +140,7 @@ fn lines_for(url: &str) -> String {
         otlp.settle(&run, &reply(503));
         otlp.settle(&run, &Err(ConnFailure::Failed(echo.clone())));
     }));
-    // A fresh run the host refuses, in words that quote the URL.
+
     let otlp = Otlp {
         run: RwLock::new(Otlp::start(Endpoint::of(&settings))),
     };
@@ -157,7 +154,7 @@ fn lines_for(url: &str) -> String {
 }
 
 /// H3: the endpoint every line names kept the target's path and query, and the host's failure text
-/// was printed verbatim. A collector key in the query (`?api-key=`) or the path reached the log.
+
 #[test]
 fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
     for url in [
@@ -178,7 +175,7 @@ fn no_log_line_or_debug_carries_a_key_in_the_targets_query_or_path() {
 }
 
 /// RED before: a failed or non-2xx export was logged at DEBUG, so at the default level a lost batch
-/// said nothing. Every dropped export is a WARN line, as the request-log siblings warn theirs.
+
 #[test]
 fn a_dropped_export_is_a_warn_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -188,7 +185,7 @@ fn a_dropped_export_is_a_warn_line() {
         }))),
     };
     let run = otlp.run();
-    // The first answer settles the run (admitted); the next two are drops.
+
     let ok = Ok(ExchangeResponse {
         status: 200,
         ..ExchangeResponse::default()
@@ -213,7 +210,7 @@ fn a_dropped_export_is_a_warn_line() {
 }
 
 /// RED before: empty settings were refused as JSON that ended early ("EOF while parsing"), not for
-/// the missing `url` — the SDK reads empty settings as `{}`, as the request-log siblings do.
+
 #[test]
 fn empty_settings_are_refused_for_the_missing_url() {
     use busbar_contract::abi::sdk::life::Life;
@@ -223,9 +220,7 @@ fn empty_settings_are_refused_for_the_missing_url() {
 }
 
 /// OWNER RULING 2026-10-24, RED before: a url that parses but reads its credential as host and
-/// path (`https://tok/en@host`, `https://u:123/x@host`) was taken, so the credential was dialled as
-/// a host and written into lines. It is refused at validate, open and refresh (a refused refresh
-/// keeps the old endpoint), naming the problem, the credential cut from the url it shows.
+
 #[test]
 fn an_ambiguous_url_is_refused_without_its_credential() {
     use busbar_contract::abi::sdk::life::Life;
@@ -246,7 +241,7 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
         assert!(otlp.refresh(settings.as_bytes(), &[], 2).is_err(), "{url}");
         assert_eq!(otlp.endpoint().shown, "https://ok.example/v1/traces");
     }
-    // A credential written as the URL grammar wants it is taken.
+
     for url in [
         "https://u:p@collector.example/v1/traces",
         "https://tok%2Fen@collector.example/v1/traces",
@@ -259,7 +254,7 @@ fn an_ambiguous_url_is_refused_without_its_credential() {
 }
 
 /// RED before: `serve` answered a bare REFUSED. It now says why, in the words every export sibling
-/// uses.
+
 #[test]
 fn every_refusal_names_its_cause_through_the_door() {
     use super::NO_ROUTE;
@@ -281,8 +276,6 @@ fn every_refusal_names_its_cause_through_the_door() {
         h
     };
 
-    // `deliver` / `check` with no instance answer NO_INSTANCE; neither the host nor the test kit
-    // enters a kind op on no instance (`reply::call_in` asserts it), so that arm is not driven.
     let mut opened = call_in(
         op(|t| &t.head.open),
         None,
@@ -293,8 +286,7 @@ fn every_refusal_names_its_cause_through_the_door() {
     );
     assert_eq!(opened.outcome, Outcome::Ready);
     let instance = opened.take_instance().expect("an instance");
-    // `scrape` is driven over the loader (the plugin crate's conformance test): the test kit copies
-    // no `ScrapeOut`.
+
     let c = call_in(
         op(|t| &t.serve),
         Some(&instance),
@@ -313,8 +305,7 @@ fn every_refusal_names_its_cause_through_the_door() {
 }
 
 /// RED before: a url the parser cannot parse at all (`svc:pa` is no port) skipped the ambiguity
-/// check, so a credential holding an unescaped `/` was silently dropped from the request. It is
-/// refused, the credential cut from the words.
+
 #[test]
 fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
     use busbar_contract::abi::sdk::life::Life;
@@ -326,7 +317,7 @@ fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
 }
 
 /// An `ExportTraceServiceResponse` body carrying `partial_success`, encoded by the OpenTelemetry
-/// project's own types.
+
 fn partial_success_body(rejected_spans: i64, error_message: &str) -> Vec<u8> {
     use opentelemetry_proto::tonic::collector::trace::v1::{
         ExportTracePartialSuccess, ExportTraceServiceResponse,
@@ -360,8 +351,7 @@ fn admitted_run(url: &str) -> (Otlp, std::sync::Arc<super::Run>) {
 }
 
 /// RED before: a 2xx whose `partial_success` rejected spans dropped them without a word. It is one
-/// warn line with the count and the collector's (scrubbed) message; an empty or undecodable 2xx
-/// body stays a success with no line.
+
 #[test]
 fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -385,10 +375,10 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
                 .to_string()
         )]
     );
-    // A count alone, with no message, is still a rejection.
+
     let lines = captured(|| otlp.settle(&run, &reply(partial_success_body(2, ""))));
     assert_eq!(lines.len(), 1, "{lines:?}");
-    // Nothing rejected and an empty protobuf response are silent successes.
+
     for body in [partial_success_body(0, ""), Vec::new()] {
         let lines = captured(|| otlp.settle(&run, &reply(body.clone())));
         assert!(lines.is_empty(), "{body:?}: {lines:?}");
@@ -396,8 +386,7 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
 }
 
 /// A reply whose body passes the bound fails the exchange after its head; the batch reached the
-/// collector, so a 2xx is delivered and any other status is the usual non-2xx drop with its status.
-/// A failure with no head, or any other failure, stays a failure.
+
 #[test]
 fn a_reply_past_the_bound_keeps_its_head_status() {
     use super::{delivered_past_bound, REPLY_OVER_BOUND};
@@ -558,7 +547,7 @@ fn a_late_refusal_preserves_the_settled_admission_verdict() {
             assert!(!lines[0].1.contains("disabling"));
             assert!(lines[0].1.contains("refused"), "{lines:?}");
         }
-        // A later successful in-flight answer must not re-enable a disabled run either.
+
         captured(|| {
             otlp.settle(
                 &run,
@@ -660,7 +649,7 @@ fn admission_logs_allow_a_subscriber_to_inspect_the_same_run() {
 }
 
 /// RED before: the two skipped-line notices were debug, so at the default level a dropped line said
-/// nothing. A skipped line is a warn.
+
 #[test]
 fn a_skipped_line_is_a_warn_line() {
     let lines = captured(|| {
@@ -674,8 +663,6 @@ fn a_skipped_line_is_a_warn_line() {
         "{lines:?}"
     );
 }
-
-// ── batch_body (T1) ─────────────────────────────────────────────────────────────────────────────
 
 /// A `traces` line for the span with id `n`.
 fn line(n: u64) -> String {
@@ -697,7 +684,7 @@ fn span_ids(body: &[u8]) -> Vec<u64> {
 }
 
 /// Two valid lines are two spans, in order; a valid line after a non-JSON one is still exported;
-/// CRLF line endings, blank lines and a missing trailing newline change nothing.
+
 #[test]
 fn a_batch_is_split_into_its_span_lines() {
     let (a, b, c) = (line(1), line(2), line(3));
@@ -722,7 +709,7 @@ fn a_batch_is_split_into_its_span_lines() {
 }
 
 /// RED before: the collector's `partial_success` message was scrubbed with the url's parts alone, so
-/// a collector echoing the request's `Authorization: Basic <token>` logged a reversible credential.
+
 #[test]
 fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -743,9 +730,7 @@ fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
 }
 
 /// RED before: the collector's message was printed raw and whole (a newline forged a line, a long
-/// one filled the log) and a message that is not UTF-8 made the whole answer undecodable, so the
-/// rejected count was lost. The message is logged Debug-quoted and capped at 256 characters, and
-/// the count is reported whatever the message bytes.
+
 #[test]
 fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -766,7 +751,6 @@ fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
     assert!(message.ends_with("…\""), "{message:?}");
     assert!(message.chars().count() < 256 + 80, "{message:?}");
 
-    // `PartialSuccess { rejected_spans: 4, error_message: [0xff, 'a'] }`, by hand.
     let inner = [0x08, 0x04, 0x12, 0x02, 0xff, b'a'];
     let mut body = vec![0x0a, inner.len() as u8];
     body.extend_from_slice(&inner);
@@ -776,7 +760,7 @@ fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
 }
 
 /// The disabling line and the two skipped-record lines carry their catalogue codes (7140, 7144);
-/// the disabling line names the collector. RED before: they carried no `diag` (nor the endpoint).
+
 #[test]
 fn the_disabling_and_skipped_record_lines_carry_their_codes() {
     let settings = crate::OtlpSettings {
@@ -804,7 +788,7 @@ fn the_disabling_and_skipped_record_lines_carry_their_codes() {
 }
 
 /// Every code the declaration states is raised on a line, and the declaration states exactly the
-/// six codes the sink raises.
+
 #[test]
 fn every_declared_code_is_on_a_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -876,8 +860,7 @@ fn every_declared_code_is_on_a_line() {
 }
 
 /// The Basic `Authorization` rides sealed: the framed head shows `<sealed>` for it (the SDK frames
-/// and wipes the value), in the same field order as before, and the instance holds the credential
-/// as a `Cred` that verifies against the Basic value. RED before: the value rode as plain bytes.
+
 #[test]
 fn the_basic_authorization_rides_sealed() {
     let endpoint = Endpoint::of(&crate::OtlpSettings {
@@ -892,14 +875,14 @@ fn the_basic_authorization_rides_sealed() {
             (&b"authorization"[..], &b"<sealed>"[..]),
         ]
     );
-    // base64("us@r:p:ss"), held by the instance as a `Cred`.
+
     assert!(endpoint
         .target
         .authorization
         .as_ref()
         .expect("held")
         .verify_eq(b"Basic dXNAcjpwOnNz"));
-    // No credential: no sealed field.
+
     let plain = Endpoint::of(&crate::OtlpSettings {
         url: "http://127.0.0.1:4318/v1/traces".into(),
     });
@@ -909,15 +892,14 @@ fn the_basic_authorization_rides_sealed() {
 }
 
 /// The Statement states the alias rewrite (`otlp`), the one source for both doors. RED before: it
-/// stated none.
+
 #[test]
 fn the_statement_states_its_alias_rewrite() {
     assert_eq!(super::STATEMENT.rewrites_len, 1);
 }
 
 /// RED before: the ambiguous-url refusal echoed everything after the last `@`, path and query
-/// included, and a collector path or query can carry a key. The echo is path-cut like every other
-/// line (`scheme://***@host[:port]`, `/***`, `?***`); the words are otherwise the SDK's.
+
 #[test]
 fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
     use busbar_contract::abi::sdk::life::Life;
@@ -952,8 +934,7 @@ fn the_ambiguous_url_refusal_cuts_the_path_and_query_it_echoes() {
 }
 
 /// RED before (HX-SLASHLESS): a url written without its slashes, or one the parser rejects, was
-/// echoed (and its `@` ignored) by helpers that need `://`. Any url text that does not parse and
-/// holds an `@` is refused as ambiguous, and no refusal, shown target or line holds a part of it.
+
 #[test]
 fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
     use busbar_contract::abi::sdk::life::Life;
@@ -1002,8 +983,7 @@ fn a_slashless_or_unparsed_url_never_echoes_a_credential() {
 }
 
 /// RED before: a 2xx whose `partial_success` rejected no span but carries an error message (the
-/// collector's warning) was silent. It is a warn line under its own code, BUSBAR-7145, with the
-/// message capped, scrubbed and quoted; `rejected_spans > 0` stays BUSBAR-7143.
+
 #[test]
 fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -1029,8 +1009,7 @@ fn a_partial_success_warning_with_no_rejection_is_a_7145_line() {
 }
 
 /// RED before: an ambiguous or unparseable echo showed whatever precedes the first `:` as the
-/// scheme, so a schemeless `admin:secret@collector/x` (which the parser reads as scheme `admin`)
-/// echoed `admin`. Only `http` and `https` are shown; any other is `***`.
+
 #[test]
 fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
     use busbar_contract::abi::sdk::life::Life;

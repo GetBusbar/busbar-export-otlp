@@ -2,33 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **`busbar-export-otlp`** — the OTLP trace sink as a `kind: export` plugin:
-//! `export.<name>.module: otlp`.
-//!
-//! **What it carries.** The `traces` stream: one record per closed span, built by the host's traces
-//! producer — the span's `trace_id`, `span_id`, `parent_span_id`, `name`, `start`,
-//! `duration_us` and whichever of `pool` / `ingress` / `op` / `lane` / `provider` / `model` it
-//! carries. Each batch the host hands it becomes one OTLP/HTTP protobuf `ExportTraceServiceRequest`
-//! ([`proto`]): one resource (`service.name = busbar`), one scope (`busbar`), one span per record.
-//!
-//! **Who dials.** The HOST: the sink declares one outbound need ([`door::STATEMENT`]) — framed
-//! `http`, pinned to the instance's `url` setting with the userinfo stripped, under the
-//! `loopback-allowed` egress class (`https://`, or plaintext `http://` to a loopback collector
-//! only) — and a delivery is one
-//! `exchange()` over it: `POST`, `content-type: application/x-protobuf`. The sink never dials.
-//! Credentials the operator embedded in the URL (`https://user:pass@collector/…`) never ride the
-//! request: they move into an `Authorization: Basic` header, and every line this sink writes masks
-//! them; a url whose credential would be misread as its host is refused ([`ambiguous_url`]). A
-//! delivery is fire-and-forget and never retried; a refused, failed or non-2xx export drops that
-//! batch, logged at warn.
-//!
-//! **Admission.** The host's connector judges every export against the need's egress class. Its
-//! first answer settles the run: refused, the sink logs `…; disabling OTLP trace export` and sends
-//! no later batch; carried, it logs `OTLP tracing enabled`.
-//!
-//! **Settings** ([`OtlpSettings`]): `url`, required.
-//!
-//! One door, both ways in: [`door::door`] is the row a busbar build links, and the sibling
-//! `busbar-export-otlp-plugin` cdylib exports the same door as its one symbol.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![deny(unsafe_code)]
@@ -60,8 +33,7 @@ pub use config::OtlpSettings;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Why a second instance is refused, the tail of the limits check's line
-/// (`busbar_contract::abi::sdk::export::second_instances`): the sink states the `one_instance`
-/// mark, so each extra instance is refused, naming the first.
+
 pub const ONE_INSTANCE: &str =
     "OTLP installs the ONE process-global tracer subscriber, so a second \
      instance could only be silently ignored — keep a single instance.";
@@ -81,15 +53,12 @@ pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
 const OTLP_TRACES_PATH: &str = "/v1/traces";
 
 /// `url` as a log line or `Debug` names it: scheme, a masked userinfo, host
-/// and port. A path becomes `/***` unless it is `/` or OTLP's own `/v1/traces`, since a collector key
-/// may ride in the path. A query becomes `?***` (`?api-key=`). A fragment is dropped. A string that
-/// is not a URL keeps only its scheme (see [`unparsed_target`]).
+
 pub fn log_target(url: &str) -> String {
     let Ok(u) = parsed_url(url) else {
         return unparsed_target(url);
     };
-    // An ambiguous url (an `@` after its host) is refused at the door; were one to get here, its
-    // parsed host is the front of a credential, so it shows as an unparsed one does.
+
     if u[url::Position::BeforePath..].contains('@') {
         return unparsed_target(url);
     }
@@ -116,8 +85,7 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// The parts of `url` that can carry a credential, as [`scrub`] cuts them from foreign text: the URL
-/// as written and masked (`busbar_contract::abi::sdk::mask::mask_url`), the URL without userinfo,
-/// its path (unless OTLP's own), query and userinfo, each also percent-decoded; longest first.
+
 pub fn secret_parts(url: &str) -> Vec<String> {
     let (clean, mut unused_authorization) = split_credentials(url);
     unused_authorization.zeroize();
@@ -156,15 +124,14 @@ pub fn secret_parts(url: &str) -> Vec<String> {
 }
 
 /// `text` (the host's failure words, which may quote the target) with each of `parts`
-/// ([`secret_parts`]) replaced by `***`: the SDK's `sdk::url::scrub`, unquoted.
+
 #[must_use]
 pub fn scrub(text: &str, parts: &[String]) -> String {
     sdk_url::scrub(text, parts.to_vec(), false)
 }
 
 /// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
-/// `https`, else `***` (any other word before a `:` may be a credential). Nothing after the scheme is shown: without a parse there is no telling credential
-/// from host.
+
 fn unparsed_target(url: &str) -> String {
     let scheme = url
         .split_once(':')
@@ -174,14 +141,7 @@ fn unparsed_target(url: &str) -> String {
 }
 
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` carries an `@` after its host —
-/// `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
-/// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
-/// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
-/// lines. A url that does not parse and holds an `@` anywhere is refused the same way
-/// (`https:svc:pa/ss@collector/…` fails on the port `pa`; its credential would silently be
-/// dropped). A parsed url with no `@` after its host is not ambiguous. The refusal shows only
-/// `<scheme>:***` ([`unparsed_target`]): the parser's host of an ambiguous url is the front of the
-/// credential, so no part of the text is echoed. The words are the SDK's (`sdk::url::ambiguous_url`).
+
 pub fn ambiguous_url(url: &str) -> Option<String> {
     let from_path = Zeroizing::new(match parsed_url(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
@@ -192,16 +152,12 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
-/// base64(user:pass)))` — RFC 7617, the userinfo percent-decoded — or `(endpoint, None)` when it
-/// carries none or is not a URL. What the request carries never holds the secret in its target.
+
 pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     let Ok(parsed) = parsed_url(endpoint) else {
-        // Not a URL the client can parse (any string is accepted as the url): no credential is
-        // made of it, and its userinfo never reaches the host's dial target.
         return (cut_userinfo(endpoint, ""), None);
     };
-    // The user-pass is an octet sequence (RFC 7617), and a userinfo escape encodes an octet (RFC
-    // 3986): the decoded bytes are base64ed as they are, never read as text first.
+
     let Some(authorization) =
         sdk_url::basic_authorization(parsed.username(), parsed.password(), Userinfo::Octets)
     else {
@@ -216,9 +172,6 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
             None => format!("{}://{host}", parsed.scheme()),
         }
     } else {
-        // Url's setters clone the suffix containing the password and target into an unwiped
-        // temporary. Its public serialization positions let us omit only userinfo, preserving
-        // the already-normalized host, port, path, query and fragment without that duplicate.
         let prefix = &parsed[..url::Position::BeforeUsername];
         let suffix = &parsed[url::Position::BeforeHost..];
         let mut clean = String::with_capacity(prefix.len() + suffix.len());
@@ -230,7 +183,7 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
 }
 
 /// The request target `endpoint` names: its path and query (`/` when it has no path), or `/` when
-/// it is not a URL.
+
 pub fn request_target(endpoint: &str) -> String {
     match parsed_url(endpoint) {
         Ok(u) => {
@@ -248,7 +201,7 @@ fn percent_decode(s: &str) -> Vec<u8> {
 }
 
 /// Standard base64 (RFC 4648 §4, `=`-padded) through the `base64` crate: the suite's independent
-/// check of the Basic credential the SDK encodes.
+
 #[cfg(test)]
 fn base64(input: &[u8]) -> String {
     use base64::Engine as _;

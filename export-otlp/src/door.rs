@@ -2,22 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR: the OTLP sink on the export kind's table (`busbar_contract::abi::export`), its
-//! lifecycle the SDK's generic one over [`Otlp`] (`abi::sdk::life`), every kind op a [`SafeSlot`].
-//!
-//! * `validate` — the settings parse as [`OtlpSettings`], refusing in serde's words or for an
-//!   ambiguous credential-bearing URL.
-//! * `open` / `refresh` — the settings become the endpoint (userinfo split into a Basic header).
-//!   Settings that do not parse are refused in `validate`'s words; a refused `refresh` leaves the
-//!   instance as it was.
-//! * `deliver` — the batch's spans as one OTLP request, sent by `exchange()` over the declared need,
-//!   PENDING while the host carries it; READY whatever became of it (a dropped export is logged at
-//!   warn). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
-//!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
-//! * `scrape` and `serve` — REFUSED, saying why: the sink carries no metrics and serves no route.
-//! * `status` — READY with nothing to report.
-//! * `check` — READY with nothing to report, except at the limits phase, where it returns the
-//!   one-instance refusal findings ([`second_instances`], [`crate::ONE_INSTANCE`]).
-//! `deliver` and `check` refuse with [`NO_INSTANCE`] when no instance is open.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
@@ -53,11 +37,7 @@ pub(crate) const TARGET_FROM: &str = "settings.url";
 pub const NEED: u32 = 0;
 
 /// The collector, reached through the host: framed `http`, under the `loopback-allowed` egress class
-/// the exporter holds its endpoint to, its target the `url` setting: the
-/// host declares the need pinned to the operator's collector, its userinfo left out, and refuses a
-/// dial to any other host. Each export names the same collector ([`Endpoint::collector`], the URL
-/// with its userinfo stripped), so no credential is ever part of what the host dials; the userinfo
-/// travels only as the request's `Authorization`.
+
 pub(crate) const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_LOOPBACK_ALLOWED,
@@ -69,7 +49,7 @@ pub(crate) const NEEDS: &[Need] = &[Need {
     keep_response_headers: std::ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: EXPORT_TIMEOUT_MS,
-    // The collector's response head is not read: the named (empty) list, nothing denied beyond it.
+
     keep_mode: KEEP_NAMED,
     _reserved: 0,
     deny_response_headers: std::ptr::null(),
@@ -81,12 +61,6 @@ const STREAMS: &[u8] = &[ExportStream::Traces as u8];
 
 const TAIL: Tail = tail(STREAMS, &[]);
 
-// THE REFERENCE-CAPABLE, NOT-SECRET SETTINGS FIELDS (busbar lead ruling item 7a), stated in the
-// Statement's extensions under the contract's `EXT_REFERENCE_FIELDS` key: a `{env:}`/`{file:}`/
-// `{module:}` reference written at `url` is resolved by the kernel IN PLACE to its string (a 1.5.5
-// config's `url: {env: VAR}` keeps booting), and a literal url passes as written (never refused
-// as a secret literal). The value is not a secret: it is never lent. The export host lends
-// nothing; the sink receives the resolved string. (A plain comment: the macro takes no doc.)
 busbar_contract::statement_extensions!(EXTENSIONS: [
     (busbar_contract::abi::mechanism::extensions::EXT_REFERENCE_FIELDS, br#"["url"]"#),
     (busbar_contract::abi::mechanism::extensions::EXT_SPAN_RECORDS, b"true"),
@@ -104,8 +78,7 @@ pub const STATEMENT: Statement = Statement {
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
-    // At most one instance: the host asks this sink's limits-phase check (`Check`), which words the
-    // refusal of a second `module: otlp` sink (`second_instances`).
+
     marks: MARK_ONE_INSTANCE,
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
@@ -113,9 +86,7 @@ pub const STATEMENT: Statement = Statement {
 };
 
 /// The catalogue codes the sink's lines carry (`declares.json`): the exporter disabled because the
-/// host refused its target, a non-2xx answer (batch dropped), a transport failure (batch dropped),
-/// a collector's partial rejection, a record skipped (not JSON, or no span identity), a collector's
-/// warning on an accepted batch (`partial_success` with a message and no rejected span).
+
 const DISABLED: &str = "BUSBAR-7140";
 const NON_2XX: &str = "BUSBAR-7141";
 const TRANSPORT_FAILURE: &str = "BUSBAR-7142";
@@ -190,7 +161,7 @@ impl Endpoint {
     pub fn of(settings: &OtlpSettings) -> Self {
         let (clean, authorization) = split_credentials(&settings.url);
         let mut secrets = secret_parts(&settings.url);
-        // A collector may echo the request's `Authorization` back: the header value and its token.
+
         if let Some(value) = &authorization {
             secrets.extend(value.strip_prefix("Basic ").map(str::to_owned));
             secrets.push(value.clone());
@@ -200,7 +171,6 @@ impl Endpoint {
             target: Target {
                 path: request_target(&clean),
                 authorization: authorization.map(|value| {
-                    // Required to go out secured when the operator's url names a secure scheme.
                     Cred::take(&mut serde_json::Value::String(value))
                         .unwrap_or_else(Cred::empty)
                         .secure_for(&clean)
@@ -212,8 +182,7 @@ impl Endpoint {
     }
 
     /// The request carrying `body` to this endpoint, and the sealed fields it carries beside it
-    /// ([`Exchange::request_sealed`]): the `Authorization` goes in after the plain `content-type`,
-    /// the order it has always had on the wire.
+
     #[must_use]
     pub fn parts(&self, body: Vec<u8>) -> (Request, Vec<SealedField>) {
         let request = Request {
@@ -238,9 +207,7 @@ impl Endpoint {
 
 impl Endpoint {
     /// The exchange carrying `body` to this endpoint, framed.
-    ///
-    /// # Errors
-    /// The SDK's refusal to frame the request.
+
     pub fn exchange(&self, body: Vec<u8>) -> Result<Exchange, ConnFailure> {
         let (request, sealed) = self.parts(body);
         Exchange::request_sealed(request, sealed)
@@ -257,7 +224,7 @@ struct Run {
 }
 
 /// A delivery parked on the host: its exchange, and the run it was framed for, so its answer is
-/// settled and logged as that run's even when a refresh lands while it is parked.
+
 struct Parked {
     exchange: Exchange,
     run: Arc<Run>,
@@ -289,9 +256,7 @@ impl Otlp {
     }
 
     /// What became of one export framed for `run`. A refresh since then makes the answer a stale
-    /// one: it settles nothing and says nothing of the current run. A stale failure or non-2xx
-    /// answer is logged at warn as a dropped export; a stale 2xx still reports any collector
-    /// rejection, warning or unreadable reply for the old endpoint.
+
     fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
         let stale = !Arc::ptr_eq(run, &self.run());
         run.settle(stale, result);
@@ -300,15 +265,13 @@ impl Otlp {
 
 impl Run {
     /// Whether the host refused this run's exports: its connector refused the first one (the
-    /// egress class's verdict on the target, or no connector at all).
+
     fn refused(&self) -> bool {
         *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) == Some(false)
     }
 
     /// What became of one export: the first answer the host gives settles whether this run takes
-    /// spans (the line a rollout check greps for, or the refusal and that export is disabled); a
-    /// non-2xx or failed export drops that batch, logged at warn. A `stale` answer (the run it was
-    /// framed for was replaced by a refresh) settles nothing.
+
     fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
         let shown = self.endpoint.shown.as_str();
         let secrets = self.endpoint.secrets.as_slice();
@@ -328,8 +291,7 @@ impl Run {
         } else {
             None
         };
-        // A subscriber may call back into the exporter. Publish the verdict before logging and
-        // release the guard so that callback can inspect the same run.
+
         match announcement {
             Some(false) => {
                 if let Err(error) = result {
@@ -389,7 +351,7 @@ impl Run {
 }
 
 /// The error text of the door's REFUSED answer to `deliver` or `check` on no opened instance, so
-/// the host's line names why instead of a bare outcome.
+
 pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
@@ -427,9 +389,7 @@ impl Life for Otlp {
 }
 
 /// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped: the
-/// one pipeline from a `traces` batch to its request, the door's delivery and the conformance
-/// driver both (a record encodes through [`proto::span`] and [`proto::encode`], as
-/// [`proto::export_request`] does for records already parsed).
+
 pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
     let mut spans = Vec::new();
     for line in batch
@@ -481,7 +441,6 @@ impl SafeSlot for Deliver {
                     return Outcome::Ready;
                 };
                 match endpoint.exchange(body) {
-                    // Only the collector's `partial_success` is read from the body: a small bound.
                     Ok(state) => (state.reply_limit(REPLY_LIMIT), run),
                     Err(e) => {
                         dropped(&endpoint.shown, &endpoint.secrets, &e);
@@ -528,9 +487,7 @@ fn capped(text: &str) -> String {
 }
 
 /// A reply whose body passed [`REPLY_LIMIT`] fails the exchange ([`REPLY_OVER_BOUND`]) after its
-/// head was read. The batch reached the collector all the same: with a head status, the answer is
-/// that status with no body (a 2xx is delivered, its `partial_success` unread; any other status is
-/// the usual non-2xx drop, status named). Any other failure, or one with no head, stands.
+
 fn delivered_past_bound(
     result: Result<ExchangeResponse, ConnFailure>,
     head_status: Option<u16>,
@@ -555,7 +512,7 @@ fn delivered_past_bound(
 }
 
 /// The line an export that did not reach the collector writes, the host's text cut of the target's
-/// credential-bearing parts.
+
 fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
     let message = failure_text(error, secrets);
     if matches!(error, ConnFailure::Refused(_) | ConnFailure::Unarmed) {
@@ -581,8 +538,7 @@ fn failure_text(error: &ConnFailure, secrets: &[String]) -> String {
 }
 
 /// `check`: at the limits phase, a refusal of every instance after the first
-/// ([`second_instances`]) — the sink states the `one_instance` mark, so the host asks it while
-/// the configuration is resolved; READY with nothing otherwise.
+
 pub struct Check;
 
 impl SafeSlot for Check {
@@ -625,8 +581,6 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-/// `MACRO_DOOR` is the door as the macro built it, for the contract's test support
-/// (`DoorView::of`), public as the other exports state it.
 pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]

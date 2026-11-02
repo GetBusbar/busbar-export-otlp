@@ -42,8 +42,6 @@ fn a_partly_deserialized_settings_url_is_wiped_on_refusal() {
         .assert_wiped_on_linux(&["decoded settings url", "settings JSON"]);
 }
 
-// Observe only the initialized payloads owned by this settings value, before serde consumes or
-// borrows them. Map keys can also carry a secret in a malformed auth_header setting.
 pub(super) fn watch_settings_value(value: &serde_json::Value) {
     match value {
         serde_json::Value::String(text) => watch("settings JSON", text.as_bytes()),
@@ -67,8 +65,6 @@ fn removing_userinfo_keeps_the_parsers_existing_serialized_destination() {
         "https://operator@receiver.example/",
         "custom://operator:password@receiver.example:8123/path?key=value",
     ] {
-        // This is the previous serialization operation, used only as a byte-equivalence oracle.
-        // No probe observes the parser's private temporary allocations in this control.
         let mut previous = url::Url::parse(text).expect("valid credential URL");
         previous.set_username("").expect("userinfo can be removed");
         previous

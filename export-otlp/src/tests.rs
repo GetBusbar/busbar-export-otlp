@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The sink's own suite: the OTLP encoding (checked against the OpenTelemetry project's generated
-//! types), the settings refusals, and the request each delivery sends. The same crate through both
-//! doors is proven by `busbar-export-otlp-plugin`'s conformance test.
 
 use super::*;
 use busbar_contract::abi::sdk::exchange::Request;
@@ -63,8 +61,7 @@ fn expected(span: Span) -> ExportTraceServiceRequest {
 }
 
 /// Decode `bytes` with the OpenTelemetry project's own types, and require that re-encoding the
-/// decoded message reproduces them BYTE FOR BYTE — so the encoding is the proto's canonical one,
-/// not merely one a lenient decoder accepts.
+
 fn decoded(bytes: &[u8]) -> ExportTraceServiceRequest {
     let request = ExportTraceServiceRequest::decode(bytes).expect("an OTLP request");
     assert_eq!(request.encode_to_vec(), bytes, "the canonical encoding");
@@ -106,7 +103,7 @@ fn a_traces_record_is_one_otlp_span_every_field_in_its_place() {
 }
 
 /// A root span carries no parent and only the attributes it has; an empty attribute value is
-/// still the attribute (its `oneof` member is set).
+
 #[test]
 fn a_root_span_has_no_parent_and_only_its_own_attributes() {
     let record = json!({
@@ -125,9 +122,7 @@ fn a_root_span_has_no_parent_and_only_its_own_attributes() {
 }
 
 /// AN ATTRIBUTE KEEPS ITS TYPE (busbar status row 173): a record's integer is an `int_value`
-/// (1.5.5's exporter wrote `forward_once`'s `lane = i` so), its boolean a `bool_value`, its float a
-/// `double_value`, each written even at its default; a string stays a `string_value`. RED before the
-/// sink typed them: every value was its text.
+
 #[test]
 fn an_attribute_keeps_the_type_the_record_states() {
     let record = json!({
@@ -157,10 +152,7 @@ fn an_attribute_keeps_the_type_the_record_states() {
 }
 
 /// THE FULL SPAN RECORD (busbar status row 173): a line carrying the host's `span` member is
-/// encoded from it alone: its ns start and end, its attributes in its order and types (an array an
-/// `array_value`), its events and its status, whatever projected fields the line also carries.
-/// RED before the sink read it: the span was the projected fields' (µs times, string attributes,
-/// no events, no status).
+
 #[test]
 fn a_full_span_record_is_the_span() {
     use opentelemetry_proto::tonic::common::v1::ArrayValue;
@@ -247,7 +239,6 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
         json!({"trace_id": "not-hex", "span_id": "0000000000000001"}),
         json!({"trace_id": "00000000000000001", "span_id": "0000000000000001"}),
         json!({"trace_id": 1, "span_id": "0000000000000001"}),
-        // Not EXACTLY 16 hex digits (Q128 export-otlp NIT, reader r61): short, and a leading `+`.
         json!({"trace_id": "2a", "span_id": "0000000000000001"}),
         json!({"trace_id": "0000000000000001", "span_id": "ff"}),
         json!({"trace_id": "+00000000000002a", "span_id": "0000000000000001"}),
@@ -257,7 +248,7 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
 }
 
 /// A batch is ONE request: each record that is a span, in batch order; a record that is none adds
-/// nothing.
+
 #[test]
 fn a_batch_is_one_request_carrying_each_span_in_order() {
     let records = [
@@ -270,7 +261,7 @@ fn a_batch_is_one_request_carrying_each_span_in_order() {
     let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["a", "b"]);
     assert!(!proto::is_span(&records[1]));
-    // One record encodes exactly as a batch of one.
+
     assert_eq!(
         proto::export_request([&records[0]]),
         proto::export_request(&records[..1])
@@ -302,7 +293,7 @@ fn settings_refuse_in_the_grammars_words() {
 }
 
 /// A delivery POSTs the batch's OTLP request — binary, to the endpoint's path, the userinfo riding
-/// as `Authorization: Basic` instead; every line names the endpoint masked.
+
 #[test]
 fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
     let endpoint = Endpoint::of(
@@ -315,7 +306,7 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
         endpoint.shown,
         "https://***@collector.example:4318/v1/traces"
     );
-    // The collector the host dials carries no userinfo: the credential is only the header's.
+
     assert_eq!(
         endpoint.collector,
         "https://collector.example:4318/v1/traces"
@@ -340,7 +331,7 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
         (sealed[0].0, sealed[0].1.as_slice()),
         (1, &b"authorization"[..])
     );
-    // base64("us@r:p:ss"), held by the instance as a `Cred`.
+
     assert!(endpoint
         .target
         .authorization
@@ -400,9 +391,7 @@ fn the_small_encoders_match_their_standards() {
 }
 
 /// The credential split (moved with the exporter from busbar's composition root, K9e-2): whatever
-/// userinfo the endpoint carries — both halves, the password alone, the user alone, percent-encoded
-/// — leaves the URL and becomes `Authorization: Basic base64(user:pass)`; an endpoint with none is
-/// untouched and authenticates with nothing.
+
 #[test]
 fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
     let cases = [
@@ -451,8 +440,7 @@ fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
 }
 
 /// A password with an unescaped `/`, `?` or `#` makes the url unparsable (the text before it reads as
-/// a port) and ends a first-delimiter "authority" inside the password: the userinfo cut must still
-/// remove the whole password from the log form, the dial target and the settings Debug.
+
 #[test]
 fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
     for (url, secret) in [
@@ -477,8 +465,7 @@ fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
 }
 
 /// THE ONE-INSTANCE REFUSAL, byte for byte the line busbar 1.5.5's `--validate` printed for a second
-/// `module: otlp` instance (busbar `tests/v1.5.5-validate/refusals.txt`): one line per instance after
-/// the first, naming the first; one instance, or none, is no finding.
+
 #[test]
 fn a_second_instance_is_refused_in_1_5_5_words() {
     let check_limits = |names: &[String]| second_instances(names, ALIAS, ONE_INSTANCE);
@@ -496,7 +483,7 @@ fn a_second_instance_is_refused_in_1_5_5_words() {
 }
 
 /// The sink states the `one_instance` mark, which is what makes the host ask its limits check while
-/// the configuration is resolved.
+
 #[test]
 fn the_statement_marks_one_instance() {
     use busbar_contract::abi::mechanism::door::MARK_ONE_INSTANCE;
@@ -504,17 +491,11 @@ fn the_statement_marks_one_instance() {
 }
 
 /// THE NEED IS HELD TO THE OPERATOR'S COLLECTOR (THE DESIGN §5, PB-100: "Every declared need is held
-/// to its configured target: the loader's connection-table fill resolves a need's `target_from`
-/// against the instance's validated settings at open and refresh and declares the need pinned to
-/// that target"). The need names the `url` setting, so the host pins it to the collector the
-/// operator configured (its userinfo left out by the connector) and refuses a dial to any other
-/// host; a need with no `target_from` let the sink name its own dial target on every export.
+
 #[test]
 fn the_need_is_pinned_to_the_url_setting() {
     assert_eq!(door::NEEDS.len(), 1);
-    // The library forbids `unsafe`, so the need's string is not read here: the need is built from
-    // `TARGET_FROM` (same pointer, same length) and that is the setting's name. The plugin crate's
-    // conformance test reads the Statement's bytes through the door.
+
     let target = door::NEEDS[0].target_from;
     assert_eq!(door::TARGET_FROM, "settings.url");
     assert_eq!(target.len, door::TARGET_FROM.len());
@@ -522,9 +503,7 @@ fn the_need_is_pinned_to_the_url_setting() {
 }
 
 /// NO COLLECTOR CREDENTIAL RENDERS THROUGH `Debug` (Q128 export-otlp LOW, reader r82 on ba8cf38):
-/// the settings' url, the endpoint and the instance holding it mask the url's userinfo and redact
-/// the `Authorization` it became. RED before the fix: `Debug` was derived over the raw url and the
-/// decoded Basic token.
+
 #[test]
 fn no_collector_credential_renders_through_debug() {
     let raw = br#"{"url":"https://ops:hunter2@collector.example/v1/traces"}"#;
@@ -553,22 +532,17 @@ fn no_collector_credential_renders_through_debug() {
 }
 
 /// A USERINFO's PERCENT-ESCAPED OCTETS REACH THE COLLECTOR AS THEY ARE (Q128 export-otlp LOW, reader
-/// r91 on a776bd3; RFC 7617: the user-pass is an octet sequence; RFC 3986 percent-escapes encode
-/// octets): `p%FFw` is the bytes `p 0xFF w`, base64ed as written. RED before the fix: the octets
-/// went through a lossy UTF-8 reading, and `0xFF` reached the collector as `EF BF BD`.
+
 #[test]
 fn a_userinfos_escaped_octets_reach_the_collector_as_they_are() {
     let (clean, auth) = crate::split_credentials("https://u:p%FFw@collector.example/v1/traces");
     assert_eq!(clean, "https://collector.example/v1/traces");
-    // base64("u:p\xFFw") = "dTpw/3c=".
+
     assert_eq!(auth.as_deref(), Some("Basic dTpw/3c="));
 }
 
 /// A URL THAT DOES NOT PARSE STILL KEEPS ITS USERINFO OUT OF EVERY LINE AND THE DIAL TARGET (Q128
-/// export-otlp LOW, reader r131 on d26b358): 1.5.5 accepted any string as the url, so one that
-/// carries `user:pass` but fails to parse (an out-of-range port) is masked by cutting at the
-/// authority's last `@`, in the lines, in `Debug` and in the collector handed to the host. RED
-/// before the fix: the password rode all three.
+
 #[test]
 fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
     let url = "https://ops:hunter2@collector.example:99999/v1/traces";
@@ -589,9 +563,7 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
 }
 
 /// A refresh that lands while a delivery is parked on the host must not let that delivery's answer
-/// settle the NEW run (design A). The connector double pends the first ESTABLISH and refuses the
-/// resume of it; after a refresh to another collector, a fresh delivery must still reach the
-/// connector. RED before the fix: the stale refusal disabled the refreshed run, so no ESTABLISH.
+
 #[test]
 fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
     use busbar_contract::abi::export::{DeliverIn, Ops};
@@ -663,9 +635,8 @@ fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
         .outcome
     };
 
-    // Delivery 1 parks on the host (the first ESTABLISH pends) ...
     assert_eq!(deliver(1, 0), Outcome::Pending);
-    // ... a refresh moves the collector while it is parked ...
+
     let b = br#"{"url":"https://b.example/v1/traces"}"#;
     let refresh_in = TestIn::<RefreshIn>::new()
         .set(|i| &i.head.op, slot::REFRESH)
@@ -677,11 +648,10 @@ fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
         zeroed::<OutHead>(),
     );
     assert_eq!(refreshed.outcome, Outcome::Ready);
-    // ... and the host resumes delivery 1: its connector refuses it.
+
     assert_eq!(deliver(1, FLAG_RESUME), Outcome::Ready);
     assert_eq!(ESTABLISHES.load(Ordering::SeqCst), 2);
 
-    // The refresh made a new run: a fresh delivery reaches the connector again.
     let _ = deliver(2, 0);
     assert_eq!(
         ESTABLISHES.load(Ordering::SeqCst),
@@ -691,8 +661,7 @@ fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
 }
 
 /// A refresh over settings that do not parse is refused in `validate`'s words and leaves the
-/// instance as it was (design B). RED before the fix: the refresh answered READY and replaced the
-/// working endpoint with one that sends nothing, so no later delivery reached the connector.
+
 #[test]
 fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
     use busbar_contract::abi::export::{DeliverIn, Ops};
@@ -746,7 +715,6 @@ fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
         Some("settings: missing field `url`")
     );
 
-    // The instance still serves the settings it held: a delivery is carried to the connector.
     let deliver = view.op::<Ops>(|t| &t.deliver).expect("deliver");
     let deliver_in = TestIn::<DeliverIn>::new()
         .set(|i| &i.head.op, deliver.index())
@@ -785,7 +753,7 @@ fn full(extra: serde_json::Value) -> serde_json::Value {
 }
 
 /// A full span record's status: absent and `unset` are the empty status (code 0, no message); an
-/// error with no message is code ERROR with an empty message; an error's message is kept.
+
 #[test]
 fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
     let status =
@@ -801,7 +769,7 @@ fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
 }
 
 /// Real ids are high-entropy: the 16 hex digits are the exact 8 big-endian bytes (the trace id
-/// after 8 zero bytes), on the projected path and the full span's.
+
 #[test]
 fn high_entropy_ids_encode_to_their_exact_bytes() {
     let tail = [0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
@@ -827,7 +795,7 @@ fn high_entropy_ids_encode_to_their_exact_bytes() {
 }
 
 /// Projected-attribute edges: a JSON null is no attribute; an integer past `i64::MAX` is an
-/// `int_value` with the same bits; a `start` near `u64::MAX` saturates instead of overflowing.
+
 #[test]
 fn projected_attribute_and_time_edges() {
     let record = json!({
@@ -854,7 +822,7 @@ fn projected_attribute_and_time_edges() {
 }
 
 /// The `span` member wins: malformed ids in it are no span even beside valid projected ids; with
-/// both valid, the span member's name is the span's.
+
 #[test]
 fn the_span_member_wins_over_projected_fields() {
     let bad = json!({
@@ -872,8 +840,7 @@ fn the_span_member_wins_over_projected_fields() {
 }
 
 /// RED before: a JSON null attribute value became the string "null" on the full-span path (the
-/// projected path omits nulls). A null attribute is omitted; a null inside an array is an
-/// `AnyValue` with no value.
+
 #[test]
 fn a_null_attribute_is_omitted_and_a_null_array_item_is_an_empty_any_value() {
     let span = span_of(&full(json!({
@@ -898,17 +865,17 @@ fn a_null_attribute_is_omitted_and_a_null_array_item_is_an_empty_any_value() {
 }
 
 /// T2: `log_target`'s fall-through branches mask the credential: text with no `://` is
-/// all masked, and a url with no host keeps only its scheme.
+
 #[test]
 fn log_target_masks_a_credential_in_its_fall_through_branches() {
     const KEY: &str = "CANARYfall7";
-    // Not a URL at all (no `://`, and no scheme the parser accepts): nothing of it is shown.
+
     for text in [KEY.to_string(), format!("//user:{KEY}@host/v1/traces")] {
         let shown = log_target(&text);
         assert!(!shown.contains(KEY), "{text}: {shown}");
         assert_eq!(shown, "***", "{text}");
     }
-    // A URL the parser takes but that has no host: scheme only.
+
     for text in [
         format!("data:text/plain,{KEY}"),
         format!("mailto:ops:{KEY}@x"),
@@ -916,20 +883,19 @@ fn log_target_masks_a_credential_in_its_fall_through_branches() {
         assert!(url::Url::parse(&text).is_ok(), "{text} parses");
         let shown = log_target(&text);
         assert!(!shown.contains(KEY), "{text}: {shown}");
-        // A scheme other than http(s) is shown only when no `@` follows it (`mailto:ops:KEY@x`
-        // parses as the scheme `mailto`, but the word before a `:` there may be a credential).
+
         assert!(
             shown.ends_with(":***") || (text.contains('@') && shown == "***"),
             "{text}: {shown}"
         );
     }
-    // An unparsable url with a `://`: userinfo cut, path masked.
+
     let shown = log_target(&format!("https://user:{KEY}/x@host:99999/p/{KEY}"));
     assert!(!shown.contains(KEY), "{shown}");
 }
 
 /// T2: a credential written percent-encoded (`p%40ss`) is scrubbed from a host failure text that
-/// quotes it encoded, decoded, or both.
+
 #[test]
 fn a_percent_encoded_credential_is_scrubbed_in_both_forms() {
     let url = "https://opsuser:CANARY%40pw9@collector.example/v1/traces";

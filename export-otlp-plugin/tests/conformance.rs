@@ -2,28 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **THE OTLP TRACE SINK, BOTH DOORS, ONE TABLE** — the sink's linked + dropped-in conformance on
-//! the export kind's memory ABI (THE DESIGN §11.4), run against the busbar rev this repo pins
-//! (`.busbar-ref`).
-//!
-//! The sink is held two ways at once: LINKED (the logic crate's `door::door`, through the loader's
-//! `load_linked`) and DROPPED IN (this crate's built cdylib, `dlopen`ed by the loader's
-//! `load_dropped`, which resolves `busbar_plugin_door` and compares its Statement with the linked
-//! row's, byte for byte). Each is bound to a real dispatcher and to a stand-in for the host's
-//! connection table — a collector that judges each target it is asked to dial under the need's
-//! egress class (`https://`, or plaintext to `127.0.0.1` under `loopback-allowed`;
-//! `*.internal.example` never)
-//! and answers 503 on a path ending `/fail`, 200 otherwise — and driven over one script: validate,
-//! open, the kind's answers, deliveries on request tickets (spans, a record that is no span), a
-//! failing collector, refused targets, a refresh that moves the target, close. Everything the host
-//! sees — the answers, every request the connector was handed (octets included) and every line the
-//! sink logged through the door's call capture — must be identical between the doors, and every
-//! body must be an OTLP `ExportTraceServiceRequest` by the OpenTelemetry project's own types,
-//! re-encoding to the same bytes.
-//!
-//! THE RED ARMS, same file: the door asked for as another kind is refused, by either origin; a
-//! manifest stating 1.5.5's export ABI (2) is refused before `dlopen`; a refused target carries
-//! nothing and disables the run, saying so; the same image over another config answers another
-//! transcript. A missing cdylib PANICS — this test IS the dropped-in door's proof, and never skips.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -69,7 +47,7 @@ const PLAINTEXT: &str = r#"{"url":"http://collector.example/v1/traces"}"#;
 const MOVED: &str = r#"{"url":"http://127.0.0.1:4318/v2/traces"}"#;
 
 /// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-/// failure, never a skip.
+
 fn cdylib() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary has a path");
     let profile = exe
@@ -89,8 +67,6 @@ fn cdylib() -> PathBuf {
 fn row() -> LinkedRow {
     LinkedRow::of(busbar_export_otlp::door::door).expect("the linked door renders")
 }
-
-// ── the host's stand-ins ─────────────────────────────────────────────────────────────────────────
 
 /// One declared need: its egress class and the target it was declared at, if any.
 type Declared = (u32, Option<String>);
@@ -187,7 +163,7 @@ impl Conns for Collector {
             .get(&(caller, need))
             .cloned()
             .ok_or(ConnError::UndeclaredNeed)?;
-        // The target the plugin named at establish, else the one the need was declared at.
+
         let target = if desc.target.is_empty() {
             declared.unwrap_or_default()
         } else {
@@ -214,8 +190,6 @@ impl Conns for Collector {
             };
         let mut pieces = VecDeque::from([piece(PieceKind::Fields, Some(code))]);
         if desc.head_target.ends_with(b"/big") || desc.head_target.ends_with(b"/bigfail") {
-            // A reply body past the sink's bound that, read whole, says `partial_success` rejected
-            // 5 spans: an unknown length-delimited field pads a valid response to 80 KB.
             let mut body = ExportTraceServiceResponse {
                 partial_success: Some(ExportTracePartialSuccess {
                     rejected_spans: 5,
@@ -223,7 +197,7 @@ impl Conns for Collector {
                 }),
             }
             .encode_to_vec();
-            body.extend_from_slice(&[0x7a, 0x80, 0xf1, 0x04]); // field 15, 80_000 bytes
+            body.extend_from_slice(&[0x7a, 0x80, 0xf1, 0x04]);
             body.resize(body.len() + 80_000, 0);
             let chunks: VecDeque<Vec<u8>> = body.chunks(8192).map(<[u8]>::to_vec).collect();
             for _ in &chunks {
@@ -347,8 +321,6 @@ fn load(host: &Host, dropped: bool) -> Plugin<Export> {
         load_linked::<Export>(&row(), host.bind()).expect("the linked door loads")
     }
 }
-
-// ── the script ───────────────────────────────────────────────────────────────────────────────────
 
 fn blob(bytes: &[u8], fmt: u32) -> Blob {
     Blob {
@@ -554,7 +526,7 @@ fn transcript(dropped: bool, settings: &str) -> Value {
 }
 
 /// Every body the collector was handed, decoded by the publisher's types — and re-encoded to the
-/// very same bytes.
+
 fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
     run["carried"]
         .as_array()
@@ -574,8 +546,7 @@ fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
 }
 
 /// Follow the host's parsed capability through the real export-instance queue, each door and the
-/// collector. The supplied full record is a protocol fixture; actual kernel tracing production
-/// additionally requires an assembled-product test.
+
 #[test]
 fn full_span_records_reach_the_collector_through_both_export_instances() {
     use busbar_contract::export_calls::{Delivered, ExportCalls};
@@ -621,7 +592,7 @@ fn full_span_records_reach_the_collector_through_both_export_instances() {
             instance.takes_span_records(),
             "the producer must receive the loaded door's full-span capability; dropped={dropped}"
         );
-        // A projection that selects no normal span fields still carries the reserved member.
+
         let line = serde_json::to_vec(&json!({"span": full})).unwrap();
         let (done, completed) = std::sync::mpsc::channel();
         assert!(matches!(
@@ -733,7 +704,7 @@ fn full_span_records_reach_the_collector_through_both_export_instances() {
 }
 
 /// The linked and the dropped-in OTLP sink are ONE plugin: the same answers, the same requests to
-/// the collector, the same log — and the same image over another config is not (RED).
+
 #[test]
 fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     let linked = transcript(false, COLLECTOR);
@@ -744,8 +715,7 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     assert_eq!(linked["kind"], "Export");
     assert_eq!(linked["max_inflight"], 64);
     let validate = linked["validate"].as_array().unwrap();
-    // Empty settings read as `{}` (the SDK's rule, as every export sibling reads them): refused for
-    // the missing `url`, not as JSON that ended early.
+
     assert_eq!(
         validate[0], "Failed settings: missing field `url`",
         "{validate:?}"
@@ -781,8 +751,6 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     assert_eq!(linked["moved"], "Ready ");
     assert_eq!(linked["close"], "Ready ");
 
-    // What the collector was handed: the two span batches (the record with no identity asked for
-    // nothing), the moved target's, and the failing collector's two; nothing for a refused target.
     let carried = linked["carried"].as_array().unwrap();
     let route = |c: &Value| {
         (
@@ -836,10 +804,6 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
         42_000
     );
 
-    // The log: enabled on the first carried export of each instance and again after the refresh
-    // that moved its target (the need is re-declared), the record that is no span
-    // at warn, every dropped export at warn, the endpoint always masked (userinfo, and any path but
-    // OTLP's own `/v1/traces`, CREDENTIAL-LOCKDOWN H3); a refused target disabled.
     let lines: Vec<String> = linked["lines"]
         .as_array()
         .unwrap()
@@ -884,8 +848,7 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
             .all(|l| l.starts_with("2 ")),
         "a refusal is an error line: {all}"
     );
-    // Severity wire values: info 0, warn 1. The rollout line is info; every dropped export is warn,
-    // as the request-log siblings warn a dropped line: a lost batch is never silent.
+
     for (needle, severity) in [
         ("OTLP tracing enabled", "0 "),
         ("returned a non-2xx status", "1 "),
@@ -900,7 +863,6 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
         );
     }
 
-    // RED: the same image over another config answers another transcript.
     let other = transcript(true, PLAINTEXT);
     assert_ne!(
         other, linked,
@@ -909,10 +871,7 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
 }
 
 /// THE REPLY BOUND, end to end through the host's connector: a 2xx reply whose 80 KB body (read
-/// whole it says `partial_success` rejected 5 spans) passes the sink's 64 KiB bound is a delivered
-/// batch, with no rejection line and no dropped-export line; the same body on a 503 is the usual
-/// non-2xx drop with its status. Without `reply_limit` the first would log the rejection; without
-/// the past-bound rewrite it would log a failed export.
+
 #[test]
 fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
     for dropped in [false, true] {
@@ -993,7 +952,7 @@ fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
 }
 
 /// `check` at `phase` over instances named `names`, through the slot: the call's outcome and the
-/// findings the sink leased (the JSON text), if it wrote any.
+
 fn check_through_the_door(
     p: &Plugin<Export>,
     phase: u32,
@@ -1026,8 +985,7 @@ fn check_through_the_door(
 }
 
 /// THE LIMITS-PHASE CHECK, DRIVEN THROUGH THE DOOR: with two instances at the limits phase the sink
-/// leases `second_instances`' one refusal (naming the second and the first); at the instances phase it
-/// has nothing to say whatever the instances. Both doors.
+
 #[test]
 fn the_limits_check_refuses_a_second_instance_through_the_door() {
     let expected = serde_json::to_string(&busbar_contract::abi::sdk::export::second_instances(
@@ -1063,8 +1021,7 @@ fn the_limits_check_refuses_a_second_instance_through_the_door() {
 }
 
 /// THE NEED IS PINNED TO THE `url` SETTING, read from the Statement the door states: the target
-/// is the setting's name (its bytes, not just its length) and the rest of the declaration is the
-/// collector's.
+
 #[test]
 fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
     use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, KEEP_NAMED};
@@ -1083,7 +1040,7 @@ fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
 }
 
 /// THE STATEMENT STATES THE ALIAS REWRITE: one rewrite, of the alias class, from the module name
-/// `otlp` (its bytes, read from the Statement the door states).
+
 #[test]
 fn the_statement_states_the_otlp_alias_rewrite() {
     use busbar_contract::abi::mechanism::door::REWRITE_ALIAS;
@@ -1096,26 +1053,11 @@ fn the_statement_states_the_otlp_alias_rewrite() {
     assert_eq!(unsafe { rewrite.from.bytes() }, b"otlp");
 }
 
-// ── THE PUBLISHED CONFORMANCE SUITE ─────────────────────────────────────────────────────────────
-//
-// busbar's suite, at the commit this repo pins (`.busbar-ref`), drives the OTLP sink two ways
-// through the one loader: LINKED (the logic crate's `door::door`) and DROPPED IN (this crate's
-// built cdylib), over the export kind's script with the inputs in `conformance.json` (refused
-// settings in the grammar's words, a `traces` delivery that DIALS the collector, status and check,
-// a route-less `serve` refused; the sink carries no metrics, so no scrape); every step's crossings
-// exactly at the script's pin, the two folds equal, and the suite's RED arms kept. `plugin-ci.yml`
-// runs it under `--release`.
-//
-// THE HOST (ARCHITECT Q-P4-9): the sink's `http` need is served by busbar's own connector, composed
-// as the root composes it (`conformance_host`, rendered by the fleet template), and every delivery
-// reaches a REAL local HTTPS collector (the suite's far end, its certificate chained to the suite's
-// test anchors, which only the host trusts): the URL in `conformance.json`'s settings.
-
 #[path = "support/conformance_host.rs"]
 mod conformance_host;
 
 /// The collector's answer: an HTTP/1.1 `200` (an empty OTLP response) once a whole request (its
-/// head, then the `content-length` body it states) has been read.
+
 fn collected(seen: &[u8]) -> Option<Vec<u8>> {
     let end = seen.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
@@ -1148,9 +1090,7 @@ busbar_test_kit::conformance_suite! {
 }
 
 /// The sink's declared secret fields, as the kernel resolves them (busbar #1699; OWNER RULING,
-/// CHIP-REVIEW-v4 change 2): a `{env: …}` reference at a declared field resolves in place, and
-/// one at any other field is refused. The export host lends nothing; the sink receives the
-/// resolved string.
+
 mod declared_secrets {
     use std::sync::Arc;
 

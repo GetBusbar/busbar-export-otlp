@@ -5,7 +5,7 @@ use std::ops::Deref;
 use zeroize::Zeroize;
 
 /// The URL parser owns a serialization separate from the operator's setting. Consume it through
-/// Url's safe From<Url> implementation before wiping; never mutate Url's private representation.
+
 pub(crate) struct ParsedUrl(Option<url::Url>);
 
 impl ParsedUrl {
@@ -30,7 +30,7 @@ impl Drop for ParsedUrl {
 }
 
 /// Borrow-deserialize from the parse tree so every owned source string is still present to wipe
-/// on either success or refusal. This does not control the JSON parser's internal scratch.
+
 pub(crate) struct SettingsValue(pub(crate) serde_json::Value);
 impl Deref for SettingsValue {
     type Target = serde_json::Value;
