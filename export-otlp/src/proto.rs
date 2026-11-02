@@ -27,6 +27,9 @@
 //! Proto3 rules, as every conforming encoder writes them: fields in field-number order, a field at
 //! its default (empty, zero) left off, a `oneof` member written whenever it is set. A record with no
 //! usable `trace_id` or `span_id` is no span; a batch with no span encodes to nothing.
+//!
+//! The table is the projected-field path. When a record carries a `span` object, [`full_span`]
+//! maps that instead: `start_ns`/`end_ns`, events, status, and attributes as typed.
 
 use prost::Message as _;
 use serde_json::Value;
