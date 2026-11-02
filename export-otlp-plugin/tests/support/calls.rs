@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Webhook delivery submits owned JSONL bytes to the real dispatcher.
-use busbar_contract::abi::mechanism::call::{Blob, DeadlineClass, OutHead};
+use busbar_contract::abi::mechanism::call::{Blob, DeadlineClass, OutHead, BLOB_JSON};
 use busbar_contract::abi::mechanism::lifecycle::{self, OpenIn, OpenOut, RefreshIn};
 use busbar_contract::abi::sdk::door::{blank_in, blank_out};
 use busbar_plugin_loader::dispatch::kinds::export::Export;
@@ -10,6 +10,15 @@ use busbar_plugin_loader::dispatch::{
 };
 use std::sync::Arc;
 
+/// A synchronous or owned-submit byte loan; its owner is retained by the calling test.
+pub fn json(bytes: &[u8]) -> Blob {
+    Blob {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+        fmt: BLOB_JSON,
+        flags: 0,
+    }
+}
 pub fn dispatcher() -> Arc<Dispatcher> {
     Arc::new(Dispatcher::new(DispatchConfig::default()))
 }
@@ -22,9 +31,11 @@ pub fn bind(d: &Dispatcher, name: &str) -> Bind {
         conns: ConnTable::Probe,
     }
 }
+#[allow(dead_code)] // Used by the separate delivery test binary.
 pub fn input<I: InFrame + busbar_contract::abi::sdk::door::AbiIn>() -> I {
     blank_in()
 }
+#[allow(dead_code)] // Used by the separate delivery test binary.
 pub fn output<O: OutFrame + busbar_contract::abi::sdk::door::AbiOut>() -> O {
     blank_out()
 }
@@ -69,7 +80,7 @@ pub fn on_ticket<I: InFrame, O: OutFrame>(
 pub fn open_resumed(p: &Plugin<Export>, d: &Dispatcher, settings: &[u8]) -> Called {
     let bytes = Arc::new(settings.to_vec());
     let mut i: OpenIn = blank_in();
-    i.settings = Blob::json(&bytes);
+    i.settings = json(&bytes);
     i.generation = 1;
     let deadline = busbar_plugin_loader::dispatch::now_ns().saturating_add(30_000_000_000);
     on_ticket(
@@ -84,7 +95,7 @@ pub fn open_resumed(p: &Plugin<Export>, d: &Dispatcher, settings: &[u8]) -> Call
 }
 pub fn refresh(p: &Plugin<Export>, settings: &[u8]) -> Called {
     let mut i: RefreshIn = blank_in();
-    i.settings = Blob::json(settings);
+    i.settings = json(settings);
     i.generation = 2;
     p.call(
         lifecycle::slot::REFRESH,

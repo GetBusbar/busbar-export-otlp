@@ -114,6 +114,7 @@ pub fn host(
 ) -> Arc<dyn busbar_contract::conn::DeclaredConns> {
     host_judged(wake, anchors, false)
 }
+#[allow(dead_code)] // The direct host-proof binary uses the production guard.
 pub fn guarded_host(
     wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
