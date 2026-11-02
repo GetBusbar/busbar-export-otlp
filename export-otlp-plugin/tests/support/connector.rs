@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The real connector drives this repository's pinned TCP and HTTP transport doors.
-use busbar_contract::abi::mechanism::lifecycle::{self, OpenIn, OpenOut};
-use busbar_contract::abi::sdk::door::{blank_in, blank_out};
-use busbar_contract::abi::transport::slot;
-use busbar_core_connector::carrier::{Carry, Side};
-use busbar_core_connector::framer::{Call, Crossed, DoorFacts, FramerDoor};
 use busbar_core_connector::registry::{Entry, Transports};
-use busbar_plugin_loader::dispatch::kinds::transport::{Transport, TransportFacts};
+use busbar_plugin_loader::dispatch::kinds::transport::Transport;
 use busbar_plugin_loader::dispatch::{
-    Bind, ConnTable, DispatchConfig, Dispatcher, Frame, InFrame, LinkedRow, NoSink, OutFrame,
-    Plugin,
+    Bind, ConnTable, DispatchConfig, Dispatcher, LinkedRow, NoSink,
 };
 use rustls_pki_types::pem::PemObject;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 fn runtime() -> tokio::runtime::Handle {
     static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
@@ -29,84 +22,17 @@ fn runtime() -> tokio::runtime::Handle {
         })
         .clone()
 }
-fn transport_dispatcher() -> &'static Dispatcher {
-    static DISPATCHER: OnceLock<Dispatcher> = OnceLock::new();
-    DISPATCHER.get_or_init(|| {
-        let dispatcher = Dispatcher::new(DispatchConfig::default());
-        dispatcher.install_runtime(runtime());
-        dispatcher.install_io(busbar_core_connector::hostio::process());
-        dispatcher
-    })
-}
-struct LoadedTransport {
-    plugin: Plugin<Transport>,
-    facts: DoorFacts,
-}
-fn cross<I: InFrame, O: OutFrame>(
-    p: &Plugin<Transport>,
-    slot: u32,
-    input: &mut I,
-    output: &mut O,
-    ticket: Option<(busbar_contract::abi::mechanism::ticket::Ticket, bool)>,
-) -> Crossed {
-    let mut frame = Frame::new(*input, *output);
-    let result = match ticket {
-        Some((id, resume)) => p.call_inline(id, resume, slot, &mut frame),
-        None => p.call(slot, &mut frame),
-    };
-    *input = frame.input;
-    *output = frame.out;
-    Crossed {
-        outcome: result.outcome,
-        error: result.error,
-    }
-}
-struct CarrierTicket(busbar_plugin_loader::dispatch::InlineTicket);
-impl Side for CarrierTicket {
-    fn ticket(&self) -> busbar_contract::abi::mechanism::ticket::Ticket {
-        self.0.ticket()
-    }
-    fn register(&self, waker: &std::task::Waker) {
-        self.0.register(waker);
-    }
-}
-impl FramerDoor for LoadedTransport {
-    fn facts(&self) -> &DoorFacts {
-        &self.facts
-    }
-    fn side(&self) -> Option<Box<dyn Side>> {
-        (self.facts.role == busbar_contract::abi::transport::ROLE_CARRIER)
-            .then(|| transport_dispatcher().inline_ticket())
-            .flatten()
-            .map(|id| Box::new(CarrierTicket(id)) as Box<dyn Side>)
-    }
-    fn carry(&self, side: &dyn Side, resume: bool, call: Carry<'_>) -> Crossed {
-        let ticket = Some((side.ticket(), resume));
-        match call {
-            Carry::Listen(i, o) => cross(&self.plugin, slot::LISTEN, i, o, ticket),
-            Carry::Accept(i, o) => cross(&self.plugin, slot::ACCEPT, i, o, ticket),
-            Carry::Dial(i, o) => cross(&self.plugin, slot::DIAL, i, o, ticket),
-            Carry::Read(i, o) => cross(&self.plugin, slot::READ, i, o, ticket),
-            Carry::Write(i, o) => cross(&self.plugin, slot::WRITE, i, o, ticket),
-            Carry::Flush(i, o) => cross(&self.plugin, slot::FLUSH, i, o, ticket),
-            Carry::Shut(i, o) => cross(&self.plugin, slot::SHUT, i, o, ticket),
-            Carry::Cancel(i, o) => cross(&self.plugin, lifecycle::slot::CANCEL, i, o, None),
-        }
-    }
-    fn cross(&self, call: Call<'_>) -> Crossed {
-        match call {
-            Call::Locate(i, o) => cross(&self.plugin, slot::LOCATE, i, o, None),
-            Call::Begin(i, o) => cross(&self.plugin, slot::BEGIN, i, o, None),
-            Call::Ingest(i, o) => cross(&self.plugin, slot::INGEST, i, o, None),
-            Call::Emit(i, o) => cross(&self.plugin, slot::EMIT, i, o, None),
-            Call::Encode(i, o) => cross(&self.plugin, slot::ENCODE, i, o, None),
-            Call::Refuse(i, o) => cross(&self.plugin, slot::REFUSE, i, o, None),
-            Call::Finish(i, o) => cross(&self.plugin, slot::FINISH, i, o, None),
-            Call::Detach(i, o) => cross(&self.plugin, slot::DETACH, i, o, None),
-            Call::Adopt(i, o) => cross(&self.plugin, slot::ADOPT, i, o, None),
-            Call::Timer(i, o) => cross(&self.plugin, slot::TIMER, i, o, None),
-        }
-    }
+fn transport_dispatcher() -> Arc<Dispatcher> {
+    static DISPATCHER: OnceLock<Arc<Dispatcher>> = OnceLock::new();
+    DISPATCHER
+        .get_or_init(|| {
+            let dispatcher = Dispatcher::new(DispatchConfig::default());
+            let _ = dispatcher.lend_seal(busbar_kernel::seal::lend());
+            dispatcher.install_runtime(runtime());
+            dispatcher.install_io(busbar_core_connector::hostio::process());
+            Arc::new(dispatcher)
+        })
+        .clone()
 }
 pub fn host(
     wake: busbar_contract::conn::ConnWake,
@@ -153,40 +79,14 @@ fn host_judged(
             let row = LinkedRow::of_macro(door).expect("transport statement");
             let plugin = busbar_plugin_loader::dispatch::load_linked::<Transport>(&row, bind)
                 .expect("load transport");
-            let facts = plugin
-                .context::<TransportFacts>()
-                .expect("transport facts")
-                .clone();
-            let result = plugin.call(
-                lifecycle::slot::OPEN,
-                &mut Frame::new(blank_in::<OpenIn>(), blank_out::<OpenOut>()),
-            );
-            assert_eq!(
-                result.outcome,
-                busbar_contract::abi::mechanism::call::Outcome::Ready
-            );
-            plugin
-                .ready(transport_dispatcher(), Duration::from_secs(10))
-                .expect("ready transport");
+            let opened = busbar_core_connector::doors::Dispatched::open_on(
+                plugin,
+                &busbar_contract::transport::TransportSettings::default(),
+                transport_dispatcher(),
+            )
+            .expect("open actual transport on the host dispatcher");
             Entry {
-                door: Arc::new(LoadedTransport {
-                    plugin,
-                    facts: DoorFacts {
-                        name: name.into(),
-                        claims: facts.claims,
-                        role: facts.role,
-                        composes_over: facts.composes_over,
-                        ported: facts.ported,
-                        status_rows: facts.status_rows,
-                        datagram: facts.datagram,
-                        duplex: facts
-                            .upgrades
-                            .iter()
-                            .chain(&facts.sessions)
-                            .copied()
-                            .collect(),
-                    },
-                }),
+                door: Arc::new(opened),
                 alpn: Vec::new(),
             }
         })

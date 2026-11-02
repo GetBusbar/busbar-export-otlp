@@ -41,7 +41,7 @@ busbar-kernel = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-rcgen = { workspace = true }
+rcgen = { workspace = true, features = ["pem"] }
 serde_json = { workspace = true }
 # The OpenTelemetry project's own generated OTLP types, to decode what the host was asked to carry.
 opentelemetry-proto = { workspace = true }
