@@ -812,3 +812,13 @@ fn an_ambiguous_echo_shows_only_an_http_or_https_scheme() {
         assert_eq!(crate::log_target(url), "***", "{url}");
     }
 }
+
+#[test]
+fn capped_cuts_at_the_exact_cap_on_a_char_boundary() {
+    use super::capped;
+    assert_eq!(capped(&"é".repeat(300)), format!("{}…", "é".repeat(256)));
+    assert_eq!(capped(&"é".repeat(256)), "é".repeat(256));
+    let over = capped(&"é".repeat(257));
+    assert!(over.ends_with('…'), "{over:?}");
+    assert_eq!(over.chars().count(), 257);
+}
