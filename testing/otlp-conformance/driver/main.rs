@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The conformance subject's driver: busbar-export-otlp's own request builder, fed a JSON-lines
+//! `traces` batch, delivering what the sink would deliver to a real collector.
+//!
+//!   driver body <batch.jsonl> <out.bin>      write the OTLP request body the sink builds
+//!   driver send <url> <batch.jsonl>          POST it with the sink's own headers and target
+//!
+//! Records that are no span are skipped, by the sink's own splitting (`door::batch_body`). Exit 0
+//! iff the collector answered 2xx (send) or a body was built (body). The sink's `Endpoint`
+//! supplies the request target and headers, so what is sent is what the sink would send; only the
+//! host connector's socket is replaced by a plain HTTP/1.1 client.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

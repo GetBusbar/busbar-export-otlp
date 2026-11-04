@@ -2,6 +2,33 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **`busbar-export-otlp`** — the OTLP trace sink as a `kind: export` plugin:
+//! `export.<name>.module: otlp`.
+//!
+//! **What it carries.** The `traces` stream: one record per closed span, built by the host's traces
+//! producer — the span's `trace_id`, `span_id`, `parent_span_id`, `name`, `start`,
+//! `duration_us` and whichever of `pool` / `ingress` / `op` / `lane` / `provider` / `model` it
+//! carries. Each batch the host hands it becomes one OTLP/HTTP protobuf `ExportTraceServiceRequest`
+//! ([`proto`]): one resource (`service.name = busbar`), one scope (`busbar`), one span per record.
+//!
+//! **Who dials.** The HOST: the sink declares one outbound need ([`door::STATEMENT`]) — framed
+//! `http`, pinned to the instance's `url` setting with the userinfo stripped, under the
+//! `loopback-allowed` egress class (`https://`, or plaintext `http://` to a loopback collector
+//! only) — and a delivery is one
+//! `exchange()` over it: `POST`, `content-type: application/x-protobuf`. The sink never dials.
+//! Credentials the operator embedded in the URL (`https://user:pass@collector/…`) never ride the
+//! request: they move into an `Authorization: Basic` header, and every line this sink writes masks
+//! them; a url whose credential would be misread as its host is refused ([`ambiguous_url`]). A
+//! delivery is fire-and-forget and never retried; a refused, failed or non-2xx export drops that
+//! batch, logged at warn.
+//!
+//! **Admission.** The host's connector judges every export against the need's egress class. Its
+//! first answer settles the run: refused, the sink logs `…; disabling OTLP trace export` and sends
+//! no later batch; carried, it logs `OTLP tracing enabled`.
+//!
+//! **Settings** ([`OtlpSettings`]): `url`, required.
+//!
+//! One door, both ways in: [`door::door`] is the row a busbar build links, and the sibling
+//! `busbar-export-otlp-plugin` cdylib exports the same door as its one symbol.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![deny(unsafe_code)]
@@ -19,11 +46,25 @@ mod ownership_tests;
 #[path = "tests/wipe_probe.rs"]
 mod wipe_probe;
 
+/// The suite's watchers over the buffers that hold a credential (the wipe probe and the settings
+/// ownership check), as the test build wires them in.
+#[cfg(test)]
+#[path = "tests/seams.rs"]
+mod seams;
+
+/// Outside the suite the watchers are no-ops: nothing is watched.
+#[cfg(not(test))]
+mod seams {
+    /// Nothing watches `bytes`.
+    pub(crate) fn watch(_: &'static str, _: &[u8]) {}
+    /// Nothing watches the parsed settings.
+    pub(crate) fn watch_settings_value(_: &serde_json::Value) {}
+}
+
 /// The parsed serialization is an owned allocation, separately from the settings text.
 fn parsed_url(text: &str) -> Result<owners::ParsedUrl, url::ParseError> {
     let parsed = owners::ParsedUrl::parse(text)?;
-    #[cfg(test)]
-    crate::wipe_probe::watch("parsed url", parsed.as_str().as_bytes());
+    seams::watch("parsed url", parsed.as_str().as_bytes());
     Ok(parsed)
 }
 
@@ -38,6 +79,8 @@ pub use config::OtlpSettings;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Why a second instance is refused, the tail of the limits check's line
+/// (`busbar_contract::abi::sdk::export::second_instances`): the sink states the `one_instance`
+/// mark, so each extra instance is refused, naming the first.
 pub const ONE_INSTANCE: &str =
     "OTLP installs the ONE process-global tracer subscriber, so a second \
      instance could only be silently ignored — keep a single instance.";
@@ -57,7 +100,10 @@ pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
 const OTLP_TRACES_PATH: &str = "/v1/traces";
 
 /// `url` as a log line or `Debug` names it: scheme, a masked userinfo, host
-pub fn log_target(url: &str) -> String {
+/// and port. A path becomes `/***` unless it is `/` or OTLP's own `/v1/traces`, since a collector key
+/// may ride in the path. A query becomes `?***` (`?api-key=`). A fragment is dropped. A string that
+/// is not a URL keeps only its scheme (see [`unparsed_target`]).
+pub(crate) fn log_target(url: &str) -> String {
     let Ok(u) = parsed_url(url) else {
         return unparsed_target(url);
     };
@@ -88,7 +134,9 @@ pub fn log_target(url: &str) -> String {
 }
 
 /// The parts of `url` that can carry a credential, as [`scrub`] cuts them from foreign text: the URL
-pub fn secret_parts(url: &str) -> Vec<String> {
+/// as written and masked (`busbar_contract::abi::sdk::mask::mask_url`), the URL without userinfo,
+/// its path (unless OTLP's own), query and userinfo, each also percent-decoded; longest first.
+pub(crate) fn secret_parts(url: &str) -> Vec<String> {
     let (clean, mut unused_authorization) = split_credentials(url);
     unused_authorization.zeroize();
     let mut parts = Zeroizing::new(vec![url.to_string(), mask_url(url), clean]);
@@ -118,20 +166,22 @@ pub fn secret_parts(url: &str) -> Vec<String> {
             false
         }
     });
-    #[cfg(test)]
     for part in parts.iter() {
-        crate::wipe_probe::watch("redaction part", part.as_bytes());
+        seams::watch("redaction part", part.as_bytes());
     }
     std::mem::take(&mut *parts)
 }
 
 /// `text` (the host's failure words, which may quote the target) with each of `parts`
+/// ([`secret_parts`]) replaced by `***`: the SDK's `sdk::url::scrub`, unquoted.
 #[must_use]
-pub fn scrub(text: &str, parts: &[String]) -> String {
+pub(crate) fn scrub(text: &str, parts: &[String]) -> String {
     sdk_url::scrub(text, parts.to_vec(), false)
 }
 
 /// What a line shows of url text that does not parse: `<scheme>:***` when it opens with `http` or
+/// `https`, else `***` (any other word before a `:` may be a credential). Nothing after the scheme
+/// is shown: without a parse there is no telling credential from host.
 fn unparsed_target(url: &str) -> String {
     let scheme = url
         .split_once(':')
@@ -141,7 +191,15 @@ fn unparsed_target(url: &str) -> String {
 }
 
 /// The ambiguous-URL refusal: `Some(the refusal)` when `url` carries an `@` after its host —
-pub fn ambiguous_url(url: &str) -> Option<String> {
+/// `https://tok/en@collector/…` or `https://u:123/x@collector/…`,
+/// a credential holding an unescaped `/`, `?` or `#`, which a URL parser reads as host `tok` (or
+/// `u`, port `123`) and a path, so the credential would be dialled as a host and written into
+/// lines. A url that does not parse and holds an `@` anywhere is refused the same way
+/// (`https:svc:pa/ss@collector/…` fails on the port `pa`; its credential would silently be
+/// dropped). A parsed url with no `@` after its host is not ambiguous. The refusal shows only
+/// `<scheme>:***` ([`unparsed_target`]): the parser's host of an ambiguous url is the front of the
+/// credential, so no part of the text is echoed. The words are the SDK's (`sdk::url::ambiguous_url`).
+pub(crate) fn ambiguous_url(url: &str) -> Option<String> {
     let from_path = Zeroizing::new(match parsed_url(url) {
         Ok(parsed) => parsed[url::Position::BeforePath..].to_string(),
         Err(_) if url.contains('@') => "@".to_string(),
@@ -151,18 +209,23 @@ pub fn ambiguous_url(url: &str) -> Option<String> {
 }
 
 /// Split any userinfo OUT of `endpoint`: `(the endpoint without it, Some(Authorization: Basic
-pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
+/// base64(user:pass)))` — RFC 7617, the userinfo percent-decoded — or `(endpoint, None)` when it
+/// carries none or is not a URL. A userinfo no Basic credential can carry (a username holding a
+/// `:`, `%3A`) is cut all the same, with no `Authorization`: `(the endpoint without it, None)`.
+/// What the request carries never holds the secret in its target.
+pub(crate) fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     let Ok(parsed) = parsed_url(endpoint) else {
         return (cut_userinfo(endpoint, ""), None);
     };
-
-    let Some(authorization) =
-        sdk_url::basic_authorization(parsed.username(), parsed.password(), Userinfo::Octets)
-    else {
+    if !has_userinfo(&parsed) {
         return (endpoint.to_string(), None);
-    };
-    #[cfg(test)]
-    crate::wipe_probe::watch("Basic value", authorization.as_bytes());
+    }
+
+    let authorization =
+        sdk_url::basic_authorization(parsed.username(), parsed.password(), Userinfo::Octets);
+    if let Some(authorization) = &authorization {
+        seams::watch("Basic value", authorization.as_bytes());
+    }
     let clean = if parsed.host_str().is_none_or(str::is_empty) || parsed.scheme() == "file" {
         let host = parsed.host_str().unwrap_or("");
         match parsed.port() {
@@ -177,11 +240,22 @@ pub fn split_credentials(endpoint: &str) -> (String, Option<String>) {
         clean.push_str(suffix);
         clean
     };
-    (clean, Some(authorization))
+    (clean, authorization)
+}
+
+/// Whether `parsed` carries a userinfo: a username or a password.
+fn has_userinfo(parsed: &url::Url) -> bool {
+    !parsed.username().is_empty() || parsed.password().is_some()
+}
+
+/// Whether `url` parses and carries a userinfo (a username or a password).
+pub(crate) fn carries_userinfo(url: &str) -> bool {
+    parsed_url(url).is_ok_and(|parsed| has_userinfo(&parsed))
 }
 
 /// The request target `endpoint` names: its path and query (`/` when it has no path), or `/` when
-pub fn request_target(endpoint: &str) -> String {
+/// it is not a URL.
+pub(crate) fn request_target(endpoint: &str) -> String {
     match parsed_url(endpoint) {
         Ok(u) => {
             let target = &u[url::Position::BeforePath..url::Position::AfterQuery];
@@ -189,19 +263,6 @@ pub fn request_target(endpoint: &str) -> String {
         }
         Err(_) => "/".to_string(),
     }
-}
-
-/// The suite's view of the SDK's percent-decoder (`sdk::url::percent_decode`), over text.
-#[cfg(test)]
-fn percent_decode(s: &str) -> Vec<u8> {
-    sdk_url::percent_decode(s.as_bytes())
-}
-
-/// Standard base64 (RFC 4648 §4, `=`-padded) through the `base64` crate: the suite's independent
-#[cfg(test)]
-fn base64(input: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(input)
 }
 
 #[cfg(test)]

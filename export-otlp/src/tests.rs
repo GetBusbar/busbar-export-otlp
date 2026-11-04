@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The sink's own suite: the OTLP encoding (checked against the OpenTelemetry project's generated
+//! types), the settings refusals, and the request each delivery sends. The same crate through both
+//! doors is proven by `busbar-export-otlp-plugin`'s conformance test.
 
 use super::*;
 use busbar_contract::abi::sdk::exchange::Request;
@@ -14,6 +16,18 @@ use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{span::SpanKind, ResourceSpans, ScopeSpans, Span};
 use prost::Message as _;
 use serde_json::json;
+
+/// The suite's view of the SDK's percent-decoder (`sdk::url::percent_decode`), over text.
+fn percent_decode(s: &str) -> Vec<u8> {
+    sdk_url::percent_decode(s.as_bytes())
+}
+
+/// Standard base64 (RFC 4648 §4, `=`-padded) through the `base64` crate: the suite's independent
+/// check of the Basic credential the SDK encodes.
+pub(crate) fn base64(input: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(input)
+}
 
 #[test]
 fn parseable_url_fragments_stay_out_of_diagnostics_even_when_echoed_separately() {
@@ -61,6 +75,8 @@ fn expected(span: Span) -> ExportTraceServiceRequest {
 }
 
 /// Decode `bytes` with the OpenTelemetry project's own types, and require that re-encoding the
+/// decoded message reproduces them BYTE FOR BYTE — so the encoding is the proto's canonical one,
+/// not merely one a lenient decoder accepts.
 fn decoded(bytes: &[u8]) -> ExportTraceServiceRequest {
     let request = ExportTraceServiceRequest::decode(bytes).expect("an OTLP request");
     assert_eq!(request.encode_to_vec(), bytes, "the canonical encoding");
@@ -102,6 +118,7 @@ fn a_traces_record_is_one_otlp_span_every_field_in_its_place() {
 }
 
 /// A root span carries no parent and only the attributes it has; an empty attribute value is
+/// still the attribute (its `oneof` member is set).
 #[test]
 fn a_root_span_has_no_parent_and_only_its_own_attributes() {
     let record = json!({
@@ -241,6 +258,7 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
 }
 
 /// A batch is ONE request: each record that is a span, in batch order; a record that is none adds
+/// nothing.
 #[test]
 fn a_batch_is_one_request_carrying_each_span_in_order() {
     let records = [
@@ -285,6 +303,7 @@ fn settings_refuse_in_the_grammars_words() {
 }
 
 /// A delivery POSTs the batch's OTLP request — binary, to the endpoint's path, the userinfo riding
+/// as `Authorization: Basic` instead; every line names the endpoint masked.
 #[test]
 fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
     let endpoint = Endpoint::of(
@@ -381,6 +400,9 @@ fn the_small_encoders_match_their_standards() {
 }
 
 /// The credential split (moved with the exporter from busbar's composition root, K9e-2): whatever
+/// userinfo the endpoint carries — both halves, the password alone, the user alone, percent-encoded
+/// — leaves the URL and becomes `Authorization: Basic base64(user:pass)`; an endpoint with none is
+/// untouched and authenticates with nothing.
 #[test]
 fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
     let cases = [
@@ -429,6 +451,8 @@ fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
 }
 
 /// A password with an unescaped `/`, `?` or `#` makes the url unparsable (the text before it reads as
+/// a port) and ends a first-delimiter "authority" inside the password: the userinfo cut must still
+/// remove the whole password from the log form, the dial target and the settings Debug.
 #[test]
 fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
     for (url, secret) in [
@@ -453,6 +477,8 @@ fn an_unescaped_delimiter_in_a_password_does_not_defeat_the_userinfo_cut() {
 }
 
 /// THE ONE-INSTANCE REFUSAL, byte for byte the line busbar 1.5.5's `--validate` printed for a second
+/// `module: otlp` instance (busbar `tests/v1.5.5-validate/refusals.txt`): one line per instance after
+/// the first, naming the first; one instance, or none, is no finding.
 #[test]
 fn a_second_instance_is_refused_in_1_5_5_words() {
     let check_limits = |names: &[String]| second_instances(names, ALIAS, ONE_INSTANCE);
@@ -470,6 +496,7 @@ fn a_second_instance_is_refused_in_1_5_5_words() {
 }
 
 /// The sink states the `one_instance` mark, which is what makes the host ask its limits check while
+/// the configuration is resolved.
 #[test]
 fn the_statement_marks_one_instance() {
     use busbar_contract::abi::mechanism::door::MARK_ONE_INSTANCE;
@@ -541,6 +568,9 @@ fn an_unparsable_url_keeps_its_userinfo_out_of_lines_debug_and_the_target() {
 }
 
 /// A refresh that lands while a delivery is parked on the host must not let that delivery's answer
+/// settle the NEW run (design A). The connector double pends the first ESTABLISH and refuses the
+/// resume of it; after a refresh to another collector, a fresh delivery must still reach the
+/// connector. RED before the fix: the stale refusal disabled the refreshed run, so no ESTABLISH.
 #[test]
 fn a_parked_deliveries_answer_does_not_settle_a_refreshed_run() {
     use crate::abi_tests_support::{connector, host, OtlpDoor};
@@ -637,6 +667,53 @@ fn a_refresh_over_unparsable_settings_is_refused_and_changes_nothing() {
     );
 }
 
+/// BUSBAR-7140, the run disabled until reload: once the connector refused the run's first export,
+/// no later delivery reaches the connector again (each answers READY without dialling).
+#[test]
+fn a_run_the_connector_refused_sends_no_later_batch() {
+    use crate::abi_tests_support::{connector, host, OtlpDoor};
+    use busbar_contract::abi::host::service::ServiceOut;
+    use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, RawOutcome};
+    use busbar_contract::abi::mechanism::ticket::HostCtx;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static ESTABLISHES: AtomicUsize = AtomicUsize::new(0);
+    #[allow(unsafe_code)]
+    extern "C" fn establish(
+        _: HostCtx,
+        _: *const std::ffi::c_void,
+        out: *mut ServiceOut,
+    ) -> RawOutcome {
+        ESTABLISHES.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: the SDK lends this exclusively writable host service answer.
+        let out = unsafe { &mut *out };
+        let error = "the test connector refuses this target";
+        out.error = AbiStr {
+            ptr: error.as_ptr(),
+            len: error.len(),
+        };
+        out.outcome = RawOutcome::of(Outcome::Refused);
+        out.outcome
+    }
+    let batch = br#"{"trace_id":"0000000000000001","span_id":"0000000000000002","name":"n","start":1,"duration_us":1}"#;
+    let conns = connector(establish);
+    let host = host(&conns);
+    let instance = OtlpDoor::open(br#"{"url":"https://a.example/v1/traces"}"#, Some(&host));
+    assert_eq!(instance.deliver(batch, 1, 0), Outcome::Ready);
+    assert_eq!(
+        ESTABLISHES.load(Ordering::SeqCst),
+        1,
+        "the first export dialled"
+    );
+    for ticket in 2..5 {
+        assert_eq!(instance.deliver(batch, ticket, 0), Outcome::Ready);
+    }
+    assert_eq!(
+        ESTABLISHES.load(Ordering::SeqCst),
+        1,
+        "a delivery on the disabled run reached the connector"
+    );
+}
+
 /// The `Span` the sink encodes `record` as, through the request it builds.
 fn span_of(record: &serde_json::Value) -> Option<Span> {
     let bytes = proto::export_request([record])?;
@@ -655,6 +732,7 @@ fn full(extra: serde_json::Value) -> serde_json::Value {
 }
 
 /// A full span record's status: absent and `unset` are the empty status (code 0, no message); an
+/// error with no message is code ERROR with an empty message; an error's message is kept.
 #[test]
 fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
     let status =
@@ -670,6 +748,7 @@ fn a_full_span_records_status_is_empty_unless_it_is_an_error() {
 }
 
 /// Real ids are high-entropy: the 16 hex digits are the exact 8 big-endian bytes (the trace id
+/// after 8 zero bytes), on the projected path and the full span's.
 #[test]
 fn high_entropy_ids_encode_to_their_exact_bytes() {
     let tail = [0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
@@ -694,7 +773,10 @@ fn high_entropy_ids_encode_to_their_exact_bytes() {
     }
 }
 
-/// Projected-attribute edges: a JSON null is no attribute; an integer past `i64::MAX` is an
+/// Projected-attribute edges: a JSON null is no attribute; an integer past `i64::MAX` (which no
+/// `int_value` holds) is its decimal digits as a `string_value`, as 1.5.5 wrote a `u64` field,
+/// never a wrapped negative `int_value`, on the projected path and the full span's; a `start` near
+/// `u64::MAX` saturates instead of overflowing. RED before: `op` was `int_value` -1.
 #[test]
 fn projected_attribute_and_time_edges() {
     let record = json!({
@@ -705,22 +787,34 @@ fn projected_attribute_and_time_edges() {
     let span = span_of(&record).expect("a span");
     assert_eq!(
         span.attributes,
+        vec![kv("ingress", "i"), kv("op", "18446744073709551615")]
+    );
+    assert_eq!(span.start_time_unix_nano, u64::MAX);
+    assert_eq!(span.end_time_unix_nano, u64::MAX);
+    let span = span_of(&full(json!({
+        "attributes": [
+            {"key": "big", "value": 9223372036854775808u64},
+            {"key": "max", "value": i64::MAX},
+        ],
+    })))
+    .expect("a full span");
+    assert_eq!(
+        span.attributes,
         vec![
-            kv("ingress", "i"),
+            kv("big", "9223372036854775808"),
             KeyValue {
-                key: "op".into(),
+                key: "max".into(),
                 value: Some(AnyValue {
-                    value: Some(any_value::Value::IntValue(-1)),
+                    value: Some(any_value::Value::IntValue(i64::MAX)),
                 }),
                 ..Default::default()
             },
         ]
     );
-    assert_eq!(span.start_time_unix_nano, u64::MAX);
-    assert_eq!(span.end_time_unix_nano, u64::MAX);
 }
 
 /// The `span` member wins: malformed ids in it are no span even beside valid projected ids; with
+/// both valid, the span member's name is the span's.
 #[test]
 fn the_span_member_wins_over_projected_fields() {
     let bad = json!({

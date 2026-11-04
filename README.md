@@ -35,6 +35,15 @@ Configured from an `export.<name>.module: otlp` block. Its `settings:` are:
 
 One instance per config: a second `module: otlp` export is refused, because OTLP installs the one process-global tracer subscriber.
 
+## Differences from 1.5.5
+
+- A url whose username holds a `:` (written `%3A`, e.g. `https://us%3Aer:pass@collector/…`)
+  cannot be an `Authorization: Basic` credential: RFC 7617 forbids a `:` in the user-id, since
+  the collector would split the credential at it. busbar 1.5.5 sent `Basic base64(us:er:pass)`
+  anyway, which a collector reads as user `us`. Now the userinfo is still cut from the url the
+  host dials, no `Authorization` is sent, and opening the instance writes a warning (the userinfo
+  masked) that its exports go without the credential.
+
 ## Build
 
 ```bash

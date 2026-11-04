@@ -148,6 +148,8 @@ fn observe(address: usize, len: usize, allocation_size: usize) -> Observation {
 }
 
 /// Register only an initialized Vec/String/OsString byte payload, at its allocation's start.
+/// The caller retains ordinary ownership and must not retype or make the registered prefix
+/// uninitialized. A later registration of the same live allocation extends its known prefix.
 pub(super) fn watch(label: &'static str, bytes: &[u8]) {
     if bytes.is_empty() {
         return;

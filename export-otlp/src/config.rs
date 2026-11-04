@@ -2,6 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `settings:` of an `export.<name>.module: otlp` instance. The same serde the host's
+//! configuration grammar uses, so a settings error reads the same
+//! (`export.<name>.settings: unknown field …` / `missing field `url``). The door reads them through
+//! `busbar_contract::abi::sdk::life::settings_value` (empty settings are `{}`, so they are refused
+//! for the missing `url`, not as JSON that ended early).
 
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -43,8 +47,7 @@ impl Drop for OtlpSettings {
 
 fn url_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let url = String::deserialize(d)?;
-    #[cfg(test)]
-    crate::wipe_probe::watch("decoded settings url", url.as_bytes());
+    crate::seams::watch("decoded settings url", url.as_bytes());
     Ok(url)
 }
 

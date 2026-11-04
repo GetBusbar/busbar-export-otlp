@@ -5,15 +5,18 @@ mod connector;
 mod receiver;
 pub use connector::host;
 pub use receiver::anchors;
-pub fn far_end(answer: fn(&[u8]) -> Option<Vec<u8>>) {
-    static START: std::sync::Once = std::sync::Once::new();
-    START.call_once(|| {
+/// The suite's TLS collector, started once on a free loopback port; its port. The settings name
+/// that port, so no fixed port can collide with another process on the runner.
+pub fn far_end(answer: fn(&[u8]) -> Option<Vec<u8>>) -> u16 {
+    static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *PORT.get_or_init(|| {
         receiver::far_end_on(
-            std::net::TcpListener::bind("localhost:54017").expect("OTLP receiver"),
+            std::net::TcpListener::bind("localhost:0").expect("OTLP receiver"),
             answer,
         )
-        .expect("TLS receiver");
-    });
+        .expect("TLS receiver")
+        .port()
+    })
 }
 
 #[cfg(test)]

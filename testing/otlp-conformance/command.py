@@ -71,9 +71,11 @@ def main():
     finally:
         # KILL also reaches children left behind by a completed leader, including ones ignoring
         # TERM or retaining an output pipe. The group still belongs to this unreaped child.
+        # A group left with only the unreaped leader has no process to signal: Linux answers ESRCH,
+        # Darwin EPERM (a zombie cannot be signalled). Either way nothing of the group is running.
         try:
             os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         child.wait()
     if interrupted:

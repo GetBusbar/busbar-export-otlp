@@ -2,6 +2,23 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR: the OTLP sink on the export kind's table (`busbar_contract::abi::export`), its
+//! lifecycle the SDK's generic one over [`Otlp`] (`abi::sdk::life`), every kind op a [`SafeSlot`].
+//!
+//! * `validate` — the settings parse as [`OtlpSettings`], refusing in serde's words or for an
+//!   ambiguous credential-bearing URL.
+//! * `open` / `refresh` — the settings become the endpoint (userinfo split into a Basic header).
+//!   Settings that do not parse are refused in `validate`'s words; a refused `refresh` leaves the
+//!   instance as it was.
+//! * `deliver` — the batch's spans as one OTLP request, sent by `exchange()` over the declared need,
+//!   PENDING while the host carries it; READY whatever became of it (a dropped export is logged at
+//!   warn). The host's first answer settles the run: carried, `OTLP tracing enabled`; refused by
+//!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
+//! * `scrape` and `serve` — REFUSED, saying why: the sink carries no metrics and serves no route.
+//! * `status` — READY with nothing to report.
+//! * `check` — READY with nothing to report, except at the limits phase, where it returns the
+//!   one-instance refusal findings ([`second_instances`], [`crate::ONE_INSTANCE`]).
+//!
+//! `deliver` and `check` refuse with [`NO_INSTANCE`] when no instance is open.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
@@ -26,8 +43,8 @@ use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
-    log_target, proto, request_target, scrub, secret_parts, split_credentials, OtlpSettings, ALIAS,
-    CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME, ONE_INSTANCE,
+    carries_userinfo, log_target, proto, request_target, scrub, secret_parts, split_credentials,
+    OtlpSettings, ALIAS, CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME, ONE_INSTANCE,
 };
 
 /// The settings path the need's target is read from.
@@ -37,6 +54,11 @@ pub(crate) const TARGET_FROM: &str = "settings.url";
 pub const NEED: u32 = 0;
 
 /// The collector, reached through the host: framed `http`, under the `loopback-allowed` egress class
+/// the exporter holds its endpoint to, its target the `url` setting: the
+/// host declares the need pinned to the operator's collector, its userinfo left out, and refuses a
+/// dial to any other host. Each export names the same collector ([`Endpoint::collector`], the URL
+/// with its userinfo stripped), so no credential is ever part of what the host dials; the userinfo
+/// travels only as the request's `Authorization`.
 pub(crate) const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_LOOPBACK_ALLOWED,
@@ -85,6 +107,9 @@ pub const STATEMENT: Statement = Statement {
 };
 
 /// The catalogue codes the sink's lines carry (`declares.json`): the exporter disabled because the
+/// host refused its target, a non-2xx answer (batch dropped), a transport failure (batch dropped),
+/// a collector's partial rejection, a record skipped (not JSON, or no span identity), a collector's
+/// warning on an accepted batch (`partial_success` with a message and no rejected span).
 const DISABLED: &str = "BUSBAR-7140";
 const NON_2XX: &str = "BUSBAR-7141";
 const TRANSPORT_FAILURE: &str = "BUSBAR-7142";
@@ -154,18 +179,26 @@ impl std::fmt::Debug for Endpoint {
 }
 
 impl Endpoint {
-    /// The endpoint `settings` name.
+    /// The endpoint `settings` name. A userinfo no Basic credential can carry is cut from the
+    /// collector all the same, and a warn line says its exports go without it.
     #[must_use]
     pub fn of(settings: &OtlpSettings) -> Self {
         let (clean, authorization) = split_credentials(&settings.url);
         let mut secrets = secret_parts(&settings.url);
+        let shown = log_target(&settings.url);
 
         if let Some(value) = &authorization {
             secrets.extend(value.strip_prefix("Basic ").map(str::to_owned));
             secrets.push(value.clone());
+        } else if carries_userinfo(&settings.url) {
+            tracing::warn!(
+                endpoint = %shown,
+                "OTLP url's userinfo cannot be an Authorization: Basic credential (its username \
+                 holds a `:`); exports go without it"
+            );
         }
         Self {
-            shown: log_target(&settings.url),
+            shown,
             target: Target {
                 path: request_target(&clean),
                 authorization: authorization.map(|value| {
@@ -180,6 +213,8 @@ impl Endpoint {
     }
 
     /// The request carrying `body` to this endpoint, and the sealed fields it carries beside it
+    /// ([`Exchange::request_sealed`]): the `Authorization` goes in after the plain `content-type`,
+    /// the order it has always had on the wire.
     #[must_use]
     pub fn parts(&self, body: Vec<u8>) -> (Request, Vec<SealedField>) {
         let request = Request {
@@ -201,10 +236,11 @@ impl Endpoint {
             .collect();
         (request, sealed)
     }
-}
 
-impl Endpoint {
     /// The exchange carrying `body` to this endpoint, framed.
+    ///
+    /// # Errors
+    /// The SDK's refusal to frame the request.
     pub fn exchange(&self, body: Vec<u8>) -> Result<Exchange, ConnFailure> {
         let (request, sealed) = self.parts(body);
         Exchange::request_sealed(request, sealed)
@@ -221,6 +257,7 @@ struct Run {
 }
 
 /// A delivery parked on the host: its exchange, and the run it was framed for, so its answer is
+/// settled and logged as that run's even when a refresh lands while it is parked.
 struct Parked {
     exchange: Exchange,
     run: Arc<Run>,
@@ -252,6 +289,9 @@ impl Otlp {
     }
 
     /// What became of one export framed for `run`. A refresh since then makes the answer a stale
+    /// one: it settles nothing and says nothing of the current run. A stale failure or non-2xx
+    /// answer is logged at warn as a dropped export; a stale 2xx still reports any collector
+    /// rejection, warning or unreadable reply for the old endpoint.
     fn settle(&self, run: &Arc<Run>, result: &Result<ExchangeResponse, ConnFailure>) {
         let stale = !Arc::ptr_eq(run, &self.run());
         run.settle(stale, result);
@@ -259,12 +299,28 @@ impl Otlp {
 }
 
 impl Run {
+    /// The line a delivered 2xx whose reply passed [`REPLY_LIMIT`] writes, naming this run's
+    /// endpoint: its `partial_success` was not read.
+    fn unread_reply(&self, status: u16) {
+        tracing::warn!(
+            diag = %PARTIAL_WARNING,
+            endpoint = %self.endpoint.shown,
+            status,
+            reply_limit = REPLY_LIMIT,
+            "OTLP collector reply exceeded the body limit; partial-success details are unavailable"
+        );
+    }
+
     /// Whether the host refused this run's exports: its connector refused the first one (the
+    /// egress class's verdict on the target, or no connector at all).
     fn refused(&self) -> bool {
         *self.admitted.lock().unwrap_or_else(PoisonError::into_inner) == Some(false)
     }
 
     /// What became of one export: the first answer the host gives settles whether this run takes
+    /// spans (the line a rollout check greps for, or the refusal and that export is disabled); a
+    /// non-2xx or failed export drops that batch, logged at warn. A `stale` answer (the run it was
+    /// framed for was replaced by a refresh) settles nothing.
     fn settle(&self, stale: bool, result: &Result<ExchangeResponse, ConnFailure>) {
         let shown = self.endpoint.shown.as_str();
         let secrets = self.endpoint.secrets.as_slice();
@@ -316,7 +372,15 @@ impl Run {
                 };
                 if let Some((rejected_spans, message)) = partial {
                     let message = capped(&scrub(&message, secrets));
-                    if rejected_spans > 0 {
+                    if rejected_spans < 0 {
+                        tracing::warn!(
+                            diag = %PARTIAL_WARNING,
+                            endpoint = %shown,
+                            rejected_spans,
+                            "OTLP collector reply carries a negative rejected span count; \
+                             partial-success details are unavailable: {message:?}"
+                        );
+                    } else if rejected_spans > 0 {
                         tracing::warn!(
                             diag = %PARTIAL_REJECTION,
                             endpoint = %shown,
@@ -344,14 +408,14 @@ impl Run {
 }
 
 /// The error text of the door's REFUSED answer to `deliver` or `check` on no opened instance, so
+/// the host's line names why instead of a bare outcome.
 pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
 fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
     let value =
         crate::owners::SettingsValue(busbar_contract::abi::sdk::life::settings_value(settings)?);
-    #[cfg(test)]
-    crate::ownership_tests::watch_settings_value(&value);
+    crate::seams::watch_settings_value(&value);
     let settings: OtlpSettings = serde::Deserialize::deserialize(&*value)
         .map_err(|e: serde_json::Error| Refusal::failed(format!("settings: {e}")))?;
     if let Some(refusal) = crate::ambiguous_url(&settings.url) {
@@ -380,9 +444,14 @@ impl Life for Otlp {
     }
 }
 
-/// The OTLP request a JSON-lines batch makes, each line that is no span logged and skipped: the
+/// The OTLP request a JSON-lines batch makes, each line that is no span skipped (one warn line per
+/// kind of skip and batch, `records` the lines it skipped, so a bad batch cannot flood the log): the
+/// one pipeline from a `traces` batch to its request, the door's delivery and the conformance
+/// driver both (a record encodes through [`proto::span`] and [`proto::encode`], as
+/// [`proto::export_request`] does for records already parsed).
 pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
     let mut spans = Vec::new();
+    let (mut not_json, mut no_identity) = (0usize, 0usize);
     for line in batch
         .split(|b| *b == b'\n')
         .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
@@ -390,14 +459,24 @@ pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
         match serde_json::from_slice::<serde_json::Value>(line) {
             Ok(record) => match proto::span(&record) {
                 Some(span) => spans.push(span),
-                None => {
-                    tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a record with no span identity")
-                }
+                None => no_identity += 1,
             },
-            Err(_) => {
-                tracing::warn!(diag = %SKIPPED_RECORD, "OTLP span export skipped a line that is not JSON")
-            }
+            Err(_) => not_json += 1,
         }
+    }
+    if not_json > 0 {
+        tracing::warn!(
+            diag = %SKIPPED_RECORD,
+            records = not_json,
+            "OTLP span export skipped a line that is not JSON"
+        );
+    }
+    if no_identity > 0 {
+        tracing::warn!(
+            diag = %SKIPPED_RECORD,
+            records = no_identity,
+            "OTLP span export skipped a record with no span identity"
+        );
     }
     proto::encode(spans)
 }
@@ -458,8 +537,11 @@ impl SafeSlot for Deliver {
                 Outcome::Pending
             }
             Poll::Ready(result) => {
-                let result = delivered_past_bound(result, state.head_status());
+                let (result, unread) = delivered_past_bound(result, state.head_status());
                 held.life().settle(&run, &result);
+                if let Some(status) = unread {
+                    run.unread_reply(status);
+                }
                 Outcome::Ready
             }
         }
@@ -478,30 +560,28 @@ fn capped(text: &str) -> String {
 }
 
 /// A reply whose body passed [`REPLY_LIMIT`] fails the exchange ([`REPLY_OVER_BOUND`]) after its
+/// head was read. The batch reached the collector all the same: with a head status, the answer is
+/// that status with no body (a 2xx is delivered, its `partial_success` unread, and that 2xx status
+/// is returned beside it for [`Run::unread_reply`] once the answer is settled; any other status is
+/// the usual non-2xx drop, status named). Any other failure, or one with no head, stands.
 fn delivered_past_bound(
     result: Result<ExchangeResponse, ConnFailure>,
     head_status: Option<u16>,
-) -> Result<ExchangeResponse, ConnFailure> {
+) -> (Result<ExchangeResponse, ConnFailure>, Option<u16>) {
     match (&result, head_status) {
-        (Err(ConnFailure::Failed(text)), Some(status)) if text == REPLY_OVER_BOUND => {
-            if (200..300).contains(&status) {
-                tracing::warn!(
-                    diag = %PARTIAL_WARNING,
-                    status,
-                    reply_limit = REPLY_LIMIT,
-                    "OTLP collector reply exceeded the body limit; partial-success details are unavailable"
-                );
-            }
+        (Err(ConnFailure::Failed(text)), Some(status)) if text == REPLY_OVER_BOUND => (
             Ok(ExchangeResponse {
                 status,
                 ..ExchangeResponse::default()
-            })
-        }
-        _ => result,
+            }),
+            (200..300).contains(&status).then_some(status),
+        ),
+        _ => (result, None),
     }
 }
 
 /// The line an export that did not reach the collector writes, the host's text cut of the target's
+/// credential-bearing parts.
 fn dropped(shown: &str, secrets: &[String], error: &ConnFailure) {
     let message = failure_text(error, secrets);
     if matches!(error, ConnFailure::Refused(_) | ConnFailure::Unarmed) {
@@ -527,6 +607,8 @@ fn failure_text(error: &ConnFailure, secrets: &[String]) -> String {
 }
 
 /// `check`: at the limits phase, a refusal of every instance after the first
+/// ([`second_instances`]) — the sink states the `one_instance` mark, so the host asks it while
+/// the configuration is resolved; READY with nothing otherwise.
 pub struct Check;
 
 impl SafeSlot for Check {
@@ -569,6 +651,8 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
+/// `MACRO_DOOR` is the door as the macro built it, for the contract's test support
+/// (`DoorView::of`), public as the other exports state it.
 pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]

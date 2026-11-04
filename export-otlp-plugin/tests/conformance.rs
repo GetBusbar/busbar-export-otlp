@@ -2,6 +2,28 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **THE OTLP TRACE SINK, BOTH DOORS, ONE TABLE** — the sink's linked + dropped-in conformance on
+//! the export kind's memory ABI (THE DESIGN §11.4), run against the busbar rev this repo pins
+//! (`.busbar-ref`).
+//!
+//! The sink is held two ways at once: LINKED (the logic crate's `door::door`, through the loader's
+//! `load_linked`) and DROPPED IN (this crate's built cdylib, `dlopen`ed by the loader's
+//! `load_dropped`, which resolves `busbar_plugin_door` and compares its Statement with the linked
+//! row's, byte for byte). Each is bound to a real dispatcher and to a stand-in for the host's
+//! connection table — a collector that judges each target it is asked to dial under the need's
+//! egress class (`https://`, or plaintext to `127.0.0.1` under `loopback-allowed`;
+//! `*.internal.example` never)
+//! and answers 503 on a path ending `/fail`, 200 otherwise — and driven over one script: validate,
+//! open, the kind's answers, deliveries on request tickets (spans, a record that is no span), a
+//! failing collector, refused targets, a refresh that moves the target, close. Everything the host
+//! sees — the answers, every request the connector was handed (octets included) and every line the
+//! sink logged through the door's call capture — must be identical between the doors, and every
+//! body must be an OTLP `ExportTraceServiceRequest` by the OpenTelemetry project's own types,
+//! re-encoding to the same bytes.
+//!
+//! THE RED ARMS, same file: the door asked for as another kind is refused, by either origin; a
+//! manifest stating 1.5.5's export ABI (2) is refused before `dlopen`; a refused target carries
+//! nothing and disables the run, saying so; the same image over another config answers another
+//! transcript. A missing cdylib PANICS — this test IS the dropped-in door's proof, and never skips.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -535,6 +557,7 @@ fn transcript(dropped: bool, settings: &str) -> Value {
 }
 
 /// Every body the collector was handed, decoded by the publisher's types — and re-encoded to the
+/// very same bytes.
 fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
     run["carried"]
         .as_array()
@@ -554,6 +577,8 @@ fn otlp_bodies(run: &Value) -> Vec<ExportTraceServiceRequest> {
 }
 
 /// Follow the host's parsed capability through the real export-instance queue, each door and the
+/// collector. The supplied full record is a protocol fixture; actual kernel tracing production
+/// additionally requires an assembled-product test.
 #[test]
 fn full_span_records_reach_the_collector_through_both_export_instances() {
     use busbar_contract::export_calls::{Delivered, ExportCalls};
@@ -711,6 +736,7 @@ fn full_span_records_reach_the_collector_through_both_export_instances() {
 }
 
 /// The linked and the dropped-in OTLP sink are ONE plugin: the same answers, the same requests to
+/// the collector, the same log — and the same image over another config is not (RED).
 #[test]
 fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     let linked = transcript(false, COLLECTOR);
@@ -877,6 +903,10 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
 }
 
 /// THE REPLY BOUND, end to end through the host's connector: a 2xx reply whose 80 KB body (read
+/// whole it says `partial_success` rejected 5 spans) passes the sink's 64 KiB bound is a delivered
+/// batch, with no rejection line and no dropped-export line; the same body on a 503 is the usual
+/// non-2xx drop with its status. Without `reply_limit` the first would log the rejection; without
+/// the past-bound rewrite it would log a failed export.
 #[test]
 fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
     for dropped in [false, true] {
@@ -955,6 +985,7 @@ fn a_manifest_stating_the_1_5_5_export_abi_is_refused() {
 }
 
 /// `check` at `phase` over instances named `names`, through the slot: the call's outcome and the
+/// findings the sink leased (the JSON text), if it wrote any.
 fn check_through_the_door(
     p: &Plugin<Export>,
     phase: u32,
@@ -987,6 +1018,8 @@ fn check_through_the_door(
 }
 
 /// THE LIMITS-PHASE CHECK, DRIVEN THROUGH THE DOOR: with two instances at the limits phase the sink
+/// leases `second_instances`' one refusal (naming the second and the first); at the instances phase it
+/// has nothing to say whatever the instances. Both doors.
 #[test]
 fn the_limits_check_refuses_a_second_instance_through_the_door() {
     let expected = serde_json::to_string(&busbar_contract::abi::sdk::export::second_instances(
@@ -1022,6 +1055,8 @@ fn the_limits_check_refuses_a_second_instance_through_the_door() {
 }
 
 /// THE NEED IS PINNED TO THE `url` SETTING, read from the Statement the door states: the target
+/// is the setting's name (its bytes, not just its length) and the rest of the declaration is the
+/// collector's.
 #[test]
 fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
     use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, KEEP_NAMED};
@@ -1040,6 +1075,7 @@ fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
 }
 
 /// THE STATEMENT STATES THE ALIAS REWRITE: one rewrite, of the alias class, from the module name
+/// `otlp` (its bytes, read from the Statement the door states).
 #[test]
 fn the_statement_states_the_otlp_alias_rewrite() {
     use busbar_contract::abi::mechanism::door::REWRITE_ALIAS;
@@ -1056,6 +1092,7 @@ fn the_statement_states_the_otlp_alias_rewrite() {
 mod conformance_host;
 
 /// The collector's answer: an HTTP/1.1 `200` (an empty OTLP response) once a whole request (its
+/// head, then the `content-length` body it states) has been read.
 static RECEIVED: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
 
 fn collected(seen: &[u8]) -> Option<Vec<u8>> {
@@ -1100,7 +1137,10 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
     use busbar_plugin_loader::dispatch::kinds::export::Export;
     use busbar_plugin_loader::dispatch::{load_dropped, load_linked, ConnTable, Frame, LinkedRow};
     use std::sync::Arc;
-    let inputs: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let mut inputs: serde_json::Value =
+        serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let port = conformance_host::far_end(collected);
+    inputs["settings"]["url"] = format!("https://localhost:{port}/v1/traces").into();
     let settings = inputs["settings"].to_string().into_bytes();
     let row = LinkedRow::of(busbar_export_otlp::door::door).expect("actual linked statement");
     let mut answers = Vec::new();

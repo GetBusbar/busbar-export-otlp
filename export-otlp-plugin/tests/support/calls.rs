@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Webhook delivery submits owned JSONL bytes to the real dispatcher.
+//! Export calls submit owned JSONL bytes to the real dispatcher.
 use busbar_contract::abi::mechanism::call::{Blob, DeadlineClass, OutHead, BLOB_JSON};
 use busbar_contract::abi::mechanism::lifecycle::{self, OpenIn, OpenOut, RefreshIn};
 use busbar_contract::abi::sdk::door::{blank_in, blank_out};
@@ -30,14 +30,6 @@ pub fn bind(d: &Dispatcher, name: &str) -> Bind {
         dispatcher: d.adopter(),
         conns: ConnTable::Probe,
     }
-}
-#[allow(dead_code)] // Used by the separate delivery test binary.
-pub fn input<I: InFrame + busbar_contract::abi::sdk::door::AbiIn>() -> I {
-    blank_in()
-}
-#[allow(dead_code)] // Used by the separate delivery test binary.
-pub fn output<O: OutFrame + busbar_contract::abi::sdk::door::AbiOut>() -> O {
-    blank_out()
 }
 pub fn called(c: &Called) -> String {
     format!(

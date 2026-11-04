@@ -220,10 +220,16 @@ if [ "$BUILT" = 1 ]; then
     if ! run_tool "$DRIVER" send "$URL" "$HERE/fixture.jsonl" >"$OUT/work/send.log" 2>&1; then
       note "subject: the collector refused the plugin's export ($(head -1 "$OUT/work/send.log"))"
     fi
-    "$DRIVER" body "$HERE/fixture.jsonl" "$OUT/work/body.bin" || note "subject: no body built"
+    # The body runs under the same deadline as every other tool; the negative controls built from
+    # it run only when it was built, so a missing body is one reason, not three false ones.
+    BODY=0
+    if run_tool "$DRIVER" body "$HERE/fixture.jsonl" "$OUT/work/body.bin" && [ -s "$OUT/work/body.bin" ]; then
+      BODY=1
+    else
+      note "subject: no body built"
+    fi
 
     # negative controls on the wire: each MUST be refused with a 4xx.
-    head -c 40 "$OUT/work/body.bin" > "$OUT/work/truncated.bin"
     head -c 64 /dev/zero | tr '\0' '\377' > "$OUT/work/garbage.bin"
     neg() { # label content-type file
       local code
@@ -236,9 +242,12 @@ if [ "$BUILT" = 1 ]; then
       case "$code" in 4??) say "negative control: $1 -> $code (refused)";; *) note "negative control: $1 was answered $code, not refused";; esac
     }
     neg "corrupt protobuf (garbage)" application/x-protobuf "$OUT/work/garbage.bin"
-    neg "corrupt protobuf (truncated)" application/x-protobuf "$OUT/work/truncated.bin"
-    neg "wrong content-type" text/plain "$OUT/work/body.bin"
-    neg "no usable content-type" application/octet-stream "$OUT/work/body.bin"
+    if [ "$BODY" = 1 ]; then
+      head -c 40 "$OUT/work/body.bin" > "$OUT/work/truncated.bin"
+      neg "corrupt protobuf (truncated)" application/x-protobuf "$OUT/work/truncated.bin"
+      neg "wrong content-type" text/plain "$OUT/work/body.bin"
+      neg "no usable content-type" application/octet-stream "$OUT/work/body.bin"
+    fi
 
     collector_finish subject "$OUT/work/subject" traces || note "subject: collector stop or output capture failed"
     p="$("${CHECK[@]}" compare "$HERE/fixture.jsonl" "$OUT/work/subject/traces.json")" || note "subject: $p"

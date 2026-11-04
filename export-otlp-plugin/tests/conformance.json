@@ -1,5 +1,5 @@
 {
-  "settings": { "url": "https://localhost:54017/v1/traces" },
+  "settings": { "url": "https://localhost:0/v1/traces" },
   "dialing_steps": ["deliver #0"],
   "export": {
     "bad_settings": [

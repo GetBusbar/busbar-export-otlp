@@ -2,6 +2,11 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE `traces` BATCH → ONE OTLP/HTTP protobuf `ExportTraceServiceRequest`
+//! (`opentelemetry/proto/collector/trace/v1/trace_service.proto`, OTLP 1.x), encoded by `prost`
+//! over the messages it takes, declared here with their `.proto` field numbers. Not through
+//! `opentelemetry-proto`, which would link the OpenTelemetry SDK into the shipped plugin; its
+//! generated types stay the suite's oracle. One resource (`service.name = busbar`), one scope
+//! (`busbar`), one `Span` per record in batch order, from the record's projected fields.
 //! When a record carries a `span` object, `full_span` maps its nanosecond timestamps,
 //! events, status and typed attributes instead of the projected-field path.
 
@@ -35,6 +40,8 @@ const HEX_RADIX: u32 = 16;
 const INVALID_RECORD_ID: u64 = 0;
 
 /// Full-span JSON vocabulary emitted by busbar-kernel's export/traces.rs
+/// SpanRecord::finish, key_values and Producer::on_event. Projected fields use
+/// ExportField::as_token instead of duplicating the contract's vocabulary.
 mod span_record {
     pub(super) const KEY: &str = "key";
     pub(super) const VALUE: &str = "value";
@@ -133,18 +140,17 @@ struct ExportTracePartialSuccess {
     error_message: Vec<u8>,
 }
 
-/// What a collector's 2xx body says it rejected: `Some((rejected_spans, error_message))` when its
-pub fn rejected(body: &[u8]) -> Option<(i64, String)> {
-    collector_response(body).ok().flatten()
-}
-
-/// Decode the response without treating malformed protobuf as a fully accepted batch.
+/// What a collector's 2xx body says it rejected: `Ok(Some((rejected_spans, error_message)))` when
+/// its `partial_success` states a rejected count other than zero (a negative one included, which no
+/// well-formed reply states) or carries a message (read lossily as text), `Ok(None)` for an empty
+/// body or a fully accepted batch, and the decode error for a body that is no
+/// `ExportTraceServiceResponse`: a malformed reply is never taken as a fully accepted batch.
 pub(crate) fn collector_response(body: &[u8]) -> Result<Option<(i64, String)>, prost::DecodeError> {
     let Some(partial) = ExportTraceServiceResponse::decode(body)?.partial_success else {
         return Ok(None);
     };
     Ok(
-        (partial.rejected_spans > 0 || !partial.error_message.is_empty()).then(|| {
+        (partial.rejected_spans != 0 || !partial.error_message.is_empty()).then(|| {
             (
                 partial.rejected_spans,
                 String::from_utf8_lossy(&partial.error_message).into_owned(),
@@ -177,6 +183,7 @@ struct Status {
 const STATUS_CODE_ERROR: i32 = 2;
 
 /// The reserved member of a `traces` line carrying the full span record (the host hands it to a
+/// sink that takes span records).
 pub const SPAN_MEMBER: &str = "span";
 
 /// `ArrayValue` (common/v1).
@@ -233,6 +240,11 @@ fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
 }
 
 /// A record value as its `AnyValue` member, typed as the record states it (as the previous
+/// release's exporter typed a span's fields): a string its `string_value`, a boolean its
+/// `bool_value`, an integer its `int_value` (a `u64` past `i64::MAX`, which no `int_value` holds, its
+/// decimal digits as a `string_value`, as the previous release wrote such a field), any other
+/// number its `double_value`, an array its `array_value`; an object its JSON text; a null `None`
+/// (an attribute is omitted, an array item is an `AnyValue` with no value).
 fn any_value(value: &Value) -> Option<AnyValueKind> {
     Some(match value {
         Value::Null => return None,
@@ -240,7 +252,7 @@ fn any_value(value: &Value) -> Option<AnyValueKind> {
         Value::Bool(b) => AnyValueKind::Bool(*b),
         Value::Number(n) => match (n.as_i64(), n.as_u64()) {
             (Some(i), _) => AnyValueKind::Int(i),
-            (None, Some(u)) => AnyValueKind::Int(u as i64),
+            (None, Some(u)) => AnyValueKind::Text(u.to_string()),
             (None, None) => AnyValueKind::Double(n.as_f64().unwrap_or_default()),
         },
         Value::Array(items) => AnyValueKind::Array(ArrayValue {
@@ -268,6 +280,9 @@ fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
 }
 
 /// The one `Span` builder: the ids a record (or a full span record) states, as `source` carries
+/// them — the trace id after 8 zero bytes, the span id, the parent when present — and
+/// `SPAN_KIND_INTERNAL`; `fill` sets the rest from wherever the record states it. `None` when
+/// `source` has no usable trace or span id.
 fn build(source: &Value, fill: impl FnOnce(&mut Span)) -> Option<Span> {
     let trace_id = id(source.get(ExportField::TraceId.as_token())?)?;
     let span_id = id(source.get(ExportField::SpanId.as_token())?)?;
@@ -288,6 +303,9 @@ fn build(source: &Value, fill: impl FnOnce(&mut Span)) -> Option<Span> {
 }
 
 /// The full span record as its `Span`: its ids and name, its start and end
+/// in nanoseconds, its attributes in the order and types the host states them (an array an
+/// `array_value`), its events (each its time, name and attributes), and its status (an error with
+/// its message; unset the empty status), whatever `fields:` selected.
 fn full_span(full: &Value) -> Option<Span> {
     let ns = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).unwrap_or_default();
     let text = |v: &Value, key: &str| {
@@ -331,11 +349,13 @@ fn full_span(full: &Value) -> Option<Span> {
 }
 
 /// The encoded `ExportTraceServiceRequest` carrying each of `records` that is a span, in order, or
+/// `None` when none of them carries a usable span identity.
 pub fn export_request<'a>(records: impl IntoIterator<Item = &'a Value>) -> Option<Vec<u8>> {
     encode(records.into_iter().filter_map(span).collect())
 }
 
 /// The encoded `ExportTraceServiceRequest` carrying `spans` (each built once by [`span`]), or `None`
+/// when there are none.
 pub(crate) fn encode(spans: Vec<Span>) -> Option<Vec<u8>> {
     if spans.is_empty() {
         return None;
@@ -362,6 +382,7 @@ pub fn is_span(record: &Value) -> bool {
 }
 
 /// The record's `Span` message: from its full span record where the host handed one (its `span`
+/// member, [`full_span`]), else from its projected fields.
 pub(crate) fn span(record: &Value) -> Option<Span> {
     if let Some(full) = record.get(SPAN_MEMBER).filter(|v| v.is_object()) {
         return full_span(full);
@@ -386,6 +407,7 @@ pub(crate) fn span(record: &Value) -> Option<Span> {
 }
 
 /// A record's span id — 16 hex digits — as its 8 big-endian bytes; `None` when it is not one, or
+/// is zero (the invalid id in OTLP).
 fn id(value: &Value) -> Option<[u8; RECORD_ID_BYTES]> {
     let text = value.as_str()?;
     if text.len() != RECORD_ID_HEX_DIGITS || !text.bytes().all(|b| b.is_ascii_hexdigit()) {

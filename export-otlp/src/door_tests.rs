@@ -61,6 +61,7 @@ fn captured(f: impl FnOnce()) -> Vec<(tracing::Level, String, String)> {
 }
 
 /// A line that is not JSON is logged as such, not as a record with no span identity; JSON without
+/// ids keeps the identity line. RED before the fix: both lines said "no span identity".
 #[test]
 fn a_line_that_is_not_json_is_logged_as_not_json() {
     let batch = b"this is not json\n{\"name\":\"json without ids\"}\n";
@@ -77,6 +78,8 @@ fn a_line_that_is_not_json_is_logged_as_not_json() {
 }
 
 /// A answer for a run a refresh replaced settles nothing and speaks only of that old run: the
+/// connector's refusal of a parked delivery writes neither the "disabling OTLP trace export" line
+/// nor the "OTLP tracing enabled" line, and the dropped-export line names the OLD endpoint.
 #[test]
 fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
     let at = |url: &str| Endpoint::of(&crate::OtlpSettings { url: url.into() });
@@ -114,6 +117,7 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
 const CANARY: &str = "CANARY5e81bc";
 
 /// Every line logged while one instance's exports are carried, refused and dropped, for a target
+/// whose query and path carry a key, with the host's text quoting the target back.
 fn lines_for(url: &str) -> String {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let settings = crate::OtlpSettings {
@@ -265,6 +269,7 @@ fn an_unparseable_ambiguous_url_is_refused_without_its_credential() {
 }
 
 /// An `ExportTraceServiceResponse` body carrying `partial_success`, encoded by the OpenTelemetry
+/// project's own types.
 fn partial_success_body(rejected_spans: i64, error_message: &str) -> Vec<u8> {
     use opentelemetry_proto::tonic::collector::trace::v1::{
         ExportTracePartialSuccess, ExportTraceServiceResponse,
@@ -331,14 +336,25 @@ fn a_partial_success_reply_is_a_warn_line_and_an_empty_one_is_silent() {
 }
 
 /// A reply whose body passes the bound fails the exchange after its head; the batch reached the
+/// collector, so a 2xx is delivered and any other status is the usual non-2xx drop with its status.
+/// A failure with no head, or any other failure, stays a failure.
 #[test]
 fn a_reply_past_the_bound_keeps_its_head_status() {
     use super::{delivered_past_bound, REPLY_OVER_BOUND};
     let over = || Err(ConnFailure::Failed(REPLY_OVER_BOUND.to_string()));
-    let ok = delivered_past_bound(over(), Some(200)).expect("delivered");
-    assert_eq!((ok.status, ok.body.is_empty()), (200, true));
+    let (ok, unread) = delivered_past_bound(over(), Some(200));
+    let ok = ok.expect("delivered");
+    assert_eq!(
+        (ok.status, ok.body.is_empty(), unread),
+        (200, true, Some(200))
+    );
     let (otlp, run) = admitted_run("https://c.example/v1/traces");
-    let refused = delivered_past_bound(over(), Some(503)).expect("a status, not a failure");
+    let (refused, unread) = delivered_past_bound(over(), Some(503));
+    let refused = refused.expect("a status, not a failure");
+    assert_eq!(
+        unread, None,
+        "a non-2xx past the bound is the usual drop, not an unread reply"
+    );
     let lines = captured(|| otlp.settle(&run, &Ok(refused)));
     assert_eq!(
         lines,
@@ -348,9 +364,12 @@ fn a_reply_past_the_bound_keeps_its_head_status() {
             " diag=BUSBAR-7141 endpoint=https://c.example/v1/traces status=503".to_string()
         )]
     );
-    assert!(delivered_past_bound(over(), None).is_err());
+    assert!(matches!(delivered_past_bound(over(), None), (Err(_), None)));
     let reset = Err(ConnFailure::Failed("connection reset".into()));
-    assert!(delivered_past_bound(reset, Some(200)).is_err());
+    assert!(matches!(
+        delivered_past_bound(reset, Some(200)),
+        (Err(_), None)
+    ));
 }
 
 #[test]
@@ -380,24 +399,116 @@ fn a_malformed_collector_response_warns_without_echoing_its_body() {
     }
 }
 
+/// An oversized 2xx is delivered with its `partial_success` unread; the line saying so names the
+/// endpoint like every other line of the sink, and is written once the answer is settled (after a
+/// first answer's `OTLP tracing enabled`), not while the reply is unwrapped.
 #[test]
 fn an_oversized_success_warns_that_rejection_details_were_not_read() {
+    let otlp = Otlp {
+        run: RwLock::new(Otlp::start(Endpoint::of(&crate::OtlpSettings {
+            url: "https://u:SECRETpw@c.example/v1/traces".into(),
+        }))),
+    };
+    let run = otlp.run();
     let lines = captured(|| {
-        let reply = super::delivered_past_bound(
+        let (reply, unread) = super::delivered_past_bound(
             Err(ConnFailure::Failed(super::REPLY_OVER_BOUND.into())),
             Some(200),
-        )
-        .expect("preserve the collector status");
+        );
+        let reply = reply.expect("preserve the collector status");
         assert_eq!(reply.status, 200);
         assert!(reply.body.is_empty());
+        otlp.settle(&run, &Ok(reply));
+        run.unread_reply(unread.expect("a 2xx past the bound is an unread reply"));
     });
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(lines[0].0, tracing::Level::WARN);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0].1, "OTLP tracing enabled");
+    assert_eq!(lines[1].0, tracing::Level::WARN);
     assert_eq!(
-        lines[0].1,
+        lines[1].1,
         "OTLP collector reply exceeded the body limit; partial-success details are unavailable"
     );
-    assert_eq!(lines[0].2, " diag=BUSBAR-7145 status=200 reply_limit=65536");
+    assert_eq!(
+        lines[1].2,
+        " diag=BUSBAR-7145 endpoint=https://***@c.example/v1/traces status=200 reply_limit=65536"
+    );
+}
+
+/// A `partial_success` stating a negative rejected count is no reply a collector should send: it
+/// does not establish how many spans were accepted, so it warns that the details are unavailable
+/// (7145) instead of passing as a fully accepted batch, with or without a message.
+#[test]
+fn a_negative_rejected_count_warns_that_partial_success_details_are_unavailable() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    let (otlp, run) = admitted_run("https://u:SECRETpw@c.example/v1/traces");
+    for (message, quoted) in [("", "\"\""), ("odd SECRETpw", "\"odd ***\"")] {
+        let reply = Ok(ExchangeResponse {
+            status: 200,
+            body: partial_success_body(-3, message),
+            ..ExchangeResponse::default()
+        });
+        let lines = captured(|| otlp.settle(&run, &reply));
+        assert_eq!(
+            lines,
+            [(
+                tracing::Level::WARN,
+                format!(
+                    "OTLP collector reply carries a negative rejected span count; \
+                     partial-success details are unavailable: {quoted}"
+                ),
+                " diag=BUSBAR-7145 endpoint=https://***@c.example/v1/traces rejected_spans=-3"
+                    .to_string()
+            )],
+            "{message:?}"
+        );
+    }
+}
+
+/// A username holding a `:` (`%3A`) cannot be a Basic credential (RFC 7617): its userinfo is still
+/// cut from the collector the host dials, so the credential never rides the dial target, and a
+/// warn line (with the userinfo masked) says the exports go without it.
+#[test]
+fn a_userinfo_no_basic_credential_can_carry_is_cut_and_said() {
+    let url = "https://us%3Aer:s3cret@collector.example:4318/v1/traces";
+    let mut endpoint = None;
+    let lines = captured(|| {
+        endpoint = Some(Endpoint::of(&crate::OtlpSettings { url: url.into() }));
+    });
+    let endpoint = endpoint.expect("an endpoint");
+    assert_eq!(
+        endpoint.collector,
+        "https://collector.example:4318/v1/traces"
+    );
+    assert_eq!(endpoint.target.path, "/v1/traces");
+    assert!(endpoint.target.authorization.is_none());
+    assert_eq!(
+        lines,
+        [(
+            tracing::Level::WARN,
+            "OTLP url's userinfo cannot be an Authorization: Basic credential (its username \
+             holds a `:`); exports go without it"
+                .to_string(),
+            " endpoint=https://***@collector.example:4318/v1/traces".to_string()
+        )]
+    );
+    let text = format!("{lines:?} {endpoint:?}");
+    assert!(
+        !text.contains("s3cret") && !text.contains("us%3Aer"),
+        "{text}"
+    );
+
+    let lines = captured(|| {
+        let _ = Endpoint::of(&crate::OtlpSettings {
+            url: "https://user:pass@collector.example/v1/traces".into(),
+        });
+        let _ = Endpoint::of(&crate::OtlpSettings {
+            url: "https://collector.example/v1/traces".into(),
+        });
+    });
+    assert!(
+        lines.is_empty(),
+        "a usable or absent userinfo says nothing: {lines:?}"
+    );
 }
 
 #[test]
@@ -626,6 +737,7 @@ fn span_ids(body: &[u8]) -> Vec<u64> {
 }
 
 /// Two valid lines are two spans, in order; a valid line after a non-JSON one is still exported;
+/// CRLF line endings, blank lines and a missing trailing newline change nothing.
 #[test]
 fn a_batch_is_split_into_its_span_lines() {
     let (a, b, c) = (line(1), line(2), line(3));
@@ -654,7 +766,7 @@ fn a_partial_success_message_echoing_the_authorization_logs_no_token() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
     let (otlp, run) = admitted_run("https://opsuser:hunter2@c.example/v1/traces");
     assert!(run.endpoint.target.authorization.is_some());
-    let token = crate::base64(b"opsuser:hunter2");
+    let token = crate::tests::base64(b"opsuser:hunter2");
     for echo in [format!("Basic {token}"), token.clone()] {
         let reply = Ok(ExchangeResponse {
             status: 200,
@@ -697,6 +809,7 @@ fn a_partial_success_message_is_quoted_capped_and_need_not_be_utf8() {
 }
 
 /// The disabling line and the two skipped-record lines carry their catalogue codes (7140, 7144);
+/// the disabling line names the collector. RED before: they carried no `diag` (nor the endpoint).
 #[test]
 fn the_disabling_and_skipped_record_lines_carry_their_codes() {
     let settings = crate::OtlpSettings {
@@ -719,11 +832,42 @@ fn the_disabling_and_skipped_record_lines_carry_their_codes() {
     });
     assert_eq!(lines.len(), 2, "{lines:?}");
     for (_, _, fields) in &lines {
-        assert_eq!(fields, " diag=BUSBAR-7144");
+        assert_eq!(fields, " diag=BUSBAR-7144 records=1");
     }
 }
 
+/// A batch of many bad lines writes one skipped-record line per kind of skip, counting the lines it
+/// skipped, not one line per record: a bad batch cannot flood the log.
+#[test]
+fn skipped_records_are_one_counted_line_per_kind_and_batch() {
+    let batch = format!(
+        "x\n{a}\n{{}}\ny\n{{\"name\":\"no ids\"}}\nz\n{b}\n",
+        a = line(1),
+        b = line(2)
+    );
+    let lines = captured(|| {
+        let body = batch_body(batch.as_bytes()).expect("the two spans");
+        assert_eq!(span_ids(&body), [1, 2]);
+    });
+    assert_eq!(
+        lines,
+        [
+            (
+                tracing::Level::WARN,
+                "OTLP span export skipped a line that is not JSON".to_string(),
+                " diag=BUSBAR-7144 records=3".to_string()
+            ),
+            (
+                tracing::Level::WARN,
+                "OTLP span export skipped a record with no span identity".to_string(),
+                " diag=BUSBAR-7144 records=2".to_string()
+            ),
+        ]
+    );
+}
+
 /// Every code the declaration states is raised on a line, and the declaration states exactly the
+/// six codes the sink raises.
 #[test]
 fn every_declared_code_is_on_a_line() {
     use busbar_contract::abi::sdk::exchange::ExchangeResponse;
@@ -795,6 +939,8 @@ fn every_declared_code_is_on_a_line() {
 }
 
 /// The Basic `Authorization` rides sealed: the framed head shows `<sealed>` for it (the SDK frames
+/// and wipes the value), in the same field order as before, and the instance holds the credential
+/// as a `Cred` that verifies against the Basic value. RED before: the value rode as plain bytes.
 #[test]
 fn the_basic_authorization_rides_sealed() {
     let endpoint = Endpoint::of(&crate::OtlpSettings {

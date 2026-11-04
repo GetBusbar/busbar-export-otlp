@@ -9,7 +9,9 @@ import sys
 import unittest
 
 HELPER = Path(__file__).with_name("command.py")
-COMMAND_SECONDS = 1
+# Room for a loaded runner to start the nested fixture interpreter (or let the leader exit)
+# before the helper's deadline; the timeout test still finishes well inside TEST_WAIT_SECONDS.
+COMMAND_SECONDS = 3
 TEST_WAIT_SECONDS = 10
 FIXTURE_FAILSAFE_SECONDS = TEST_WAIT_SECONDS * 2
 TIMEOUT_EXIT = 124
