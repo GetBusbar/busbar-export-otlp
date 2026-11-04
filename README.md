@@ -16,6 +16,10 @@ First-party signed kind:export plugin cdylib: the OTLP trace export sink (module
 becomes one request with resource `service.name = busbar` and scope `busbar`. Full span records
 preserve typed attributes, events, nanosecond timestamps and error status.
 
+The host's exact one-member JSON markers `{"$busbar_f64":"NaN"}`,
+`{"$busbar_f64":"inf"}` and `{"$busbar_f64":"-inf"}` become OTLP double values,
+preserving non-finite attributes. Ordinary strings and other objects keep their existing encoding.
+
 Exports are never retried. A connector refusal on the first delivery disables the run until
 reload; a transport failure or non-2xx response drops that batch. `OTLP tracing enabled` means
 the host admitted the connection, and can accompany a collector error status. Collector partial

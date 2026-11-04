@@ -924,3 +924,111 @@ fn identity_validation_preserves_uppercase_ids_and_omits_invalid_parents() {
         assert_eq!(proto::export_request([&zero]), None);
     }
 }
+
+/// The neutral JSON marker restores non-finite doubles on every typed attribute path.
+#[test]
+fn nonfinite_markers_decode_as_otlp_doubles() {
+    for (marker, expected) in [
+        ("NaN", f64::NAN),
+        ("inf", f64::INFINITY),
+        ("-inf", f64::NEG_INFINITY),
+    ] {
+        let value = json!({"$busbar_f64": marker});
+        let span = span_of(&full(json!({
+            "attributes": [{"key": "number", "value": value}],
+            "events": [{"name": "event", "attributes": [{"key": "number", "value": value}]}],
+        })))
+        .expect("a full span");
+        let projected = span_of(&json!({
+            "trace_id": "0000000000000007", "span_id": "0000000000000008",
+            "pool": value,
+        }))
+        .expect("a projected span");
+        let array_span = span_of(&full(json!({
+            "attributes": [{"key": "numbers", "value": [value]}],
+        })))
+        .expect("an array span");
+        let Some(any_value::Value::ArrayValue(array)) = array_span.attributes[0]
+            .value
+            .as_ref()
+            .unwrap()
+            .value
+            .as_ref()
+        else {
+            panic!("expected an OTLP array");
+        };
+        assert_eq!(span.attributes.len(), 1);
+        assert_eq!(span.events[0].attributes.len(), 1);
+        assert_eq!(projected.attributes.len(), 1);
+        assert_eq!(array.values.len(), 1);
+        for actual in [
+            span.attributes[0].value.as_ref().unwrap(),
+            span.events[0].attributes[0].value.as_ref().unwrap(),
+            projected.attributes[0].value.as_ref().unwrap(),
+            &array.values[0],
+        ] {
+            let Some(any_value::Value::DoubleValue(actual)) = actual.value.as_ref() else {
+                panic!("{marker} must be an OTLP double, got {actual:?}");
+            };
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+    }
+}
+
+/// Only exact markers are special: strings and marker-like objects keep their old types.
+#[test]
+fn nonfinite_marker_collisions_remain_text() {
+    for value in [
+        json!("NaN"),
+        json!("inf"),
+        json!("-inf"),
+        json!("{\"$busbar_f64\":\"NaN\"}"),
+        json!({}),
+        json!({"other": "NaN"}),
+        json!({"$busbar_f64": "nan"}),
+        json!({"$busbar_f64": "Infinity"}),
+        json!({"$busbar_f64": "+inf"}),
+        json!({"$busbar_f64": "-Infinity"}),
+        json!({"$busbar_f64": "NaN "}),
+        json!({"$busbar_f64": "1.5"}),
+        json!({"$busbar_f64": null}),
+        json!({"$busbar_f64": 1.5}),
+        json!({"$busbar_f64": true}),
+        json!({"$busbar_f64": ["NaN"]}),
+        json!({"$busbar_f64": {"$busbar_f64": "NaN"}}),
+        json!({"$busbar_f64": "NaN", "extra": null}),
+        json!({"$busbar_f64": "inf", "extra": 1}),
+        json!({"$busbar_f64": "-inf", "extra": false}),
+        json!({"nested": {"$busbar_f64": "NaN"}}),
+    ] {
+        let expected = value
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        let span = span_of(&full(json!({
+            "attributes": [{"key": "ordinary", "value": value}],
+        })))
+        .expect("a span");
+        assert_eq!(span.attributes, vec![kv("ordinary", &expected)]);
+    }
+}
+
+#[test]
+fn nonfinite_marker_support_preserves_finite_numbers() {
+    for value in [0.0, -0.0, 1.5, -2.5, f64::MIN, f64::MAX] {
+        let span = span_of(&full(json!({
+            "attributes": [{"key": "finite", "value": value}],
+        })))
+        .expect("a span");
+        let Some(any_value::Value::DoubleValue(actual)) =
+            span.attributes[0].value.as_ref().unwrap().value.as_ref()
+        else {
+            panic!("finite float must stay an OTLP double");
+        };
+        assert_eq!(actual.to_bits(), value.to_bits());
+    }
+}

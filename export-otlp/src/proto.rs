@@ -243,7 +243,8 @@ fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
 /// release's exporter typed a span's fields): a string its `string_value`, a boolean its
 /// `bool_value`, an integer its `int_value` (a `u64` past `i64::MAX`, which no `int_value` holds, its
 /// decimal digits as a `string_value`, as the previous release wrote such a field), any other
-/// number its `double_value`, an array its `array_value`; an object its JSON text; a null `None`
+/// number its `double_value`, an array its `array_value`; an exact one-member `$busbar_f64`
+/// marker its non-finite `double_value`; any other object its JSON text; a null `None`
 /// (an attribute is omitted, an array item is an `AnyValue` with no value).
 fn any_value(value: &Value) -> Option<AnyValueKind> {
     Some(match value {
@@ -263,6 +264,14 @@ fn any_value(value: &Value) -> Option<AnyValueKind> {
                 })
                 .collect(),
         }),
+        Value::Object(object) if object.len() == 1 => {
+            match object.get("$busbar_f64").and_then(Value::as_str) {
+                Some("NaN") => AnyValueKind::Double(f64::NAN),
+                Some("inf") => AnyValueKind::Double(f64::INFINITY),
+                Some("-inf") => AnyValueKind::Double(f64::NEG_INFINITY),
+                _ => AnyValueKind::Text(value.to_string()),
+            }
+        }
         other => AnyValueKind::Text(other.to_string()),
     })
 }
