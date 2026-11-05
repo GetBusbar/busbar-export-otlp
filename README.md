@@ -37,9 +37,13 @@ Configured from an `export.<name>.module: otlp` block. Its `settings:` are:
 
 - `url` (required): the OTLP/HTTP traces endpoint, e.g. `https://collector.example:4318/v1/traces`. It must be `https://`; plaintext `http://` is allowed only to a loopback collector. Userinfo in the url (`https://user:pass@collector/…`) is not sent in the url: it becomes an `Authorization: Basic` header, and every log line masks it. A url whose credential holds an unescaped `/`, `?` or `#` is refused as ambiguous; percent-encode it (`%2F`, `%3F`, `%23`).
 
-One instance per config: a second `module: otlp` export is refused, because OTLP installs the one process-global tracer subscriber.
+Multiple named `module: otlp` exports can send traces to independent collectors. The host owns
+one shared trace producer; each export instance has its own endpoint and delivery state.
 
 ## Differences from 1.5.5
+
+- Multiple OTLP collector instances are supported. The old single-instance restriction belonged
+  to the previous tracer setup and no longer applies to independent export sinks.
 
 - A url whose username holds a `:` (written `%3A`, e.g. `https://us%3Aer:pass@collector/…`)
   cannot be an `Authorization: Basic` credential: RFC 7617 forbids a `:` in the user-id, since

@@ -15,36 +15,34 @@
 //!   the connector, `…; disabling OTLP trace export`, and no later batch is sent.
 //! * `scrape` and `serve` — REFUSED, saying why: the sink carries no metrics and serves no route.
 //! * `status` — READY with nothing to report.
-//! * `check` — READY with nothing to report, except at the limits phase, where it returns the
-//!   one-instance refusal findings ([`second_instances`], [`crate::ONE_INSTANCE`]).
+//! * `check` — READY with nothing to report for an opened instance. The host owns the shared
+//!   trace producer; each sink instance independently exports to its configured collector.
 //!
 //! `deliver` and `check` refuse with [`NO_INSTANCE`] when no instance is open.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
-use busbar_contract::abi::export::{
-    cancel, CheckIn, CheckOut, DeliverIn, ExportStream, Tail, CHECK_PHASE_LIMITS,
-};
+use busbar_contract::abi::export::{cancel, CheckIn, CheckOut, DeliverIn, ExportStream, Tail};
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome, BLOB_JSON};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, MARK_ONE_INSTANCE};
+use busbar_contract::abi::mechanism::call::{Blob, OutHead, Outcome};
+use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement};
 use busbar_contract::abi::sdk::conn::ConnFailure;
 use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement};
 use busbar_contract::abi::sdk::exchange::{
     exchange, Exchange, ExchangeResponse, Request, SealedField, REPLY_OVER_BOUND,
 };
-use busbar_contract::abi::sdk::export::{instance_names, second_instances, tail};
+use busbar_contract::abi::sdk::export::tail;
 pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
 use crate::{
     carries_userinfo, log_target, proto, request_target, scrub, secret_parts, split_credentials,
-    OtlpSettings, ALIAS, CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME, ONE_INSTANCE,
+    OtlpSettings, ALIAS, CONTENT_TYPE, EXPORT_TIMEOUT_MS, NAME,
 };
 
 /// The settings path the need's target is read from.
@@ -101,7 +99,6 @@ pub const STATEMENT: Statement = Statement {
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
 
-    marks: MARK_ONE_INSTANCE,
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
     ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
@@ -611,9 +608,8 @@ fn failure_text(error: &ConnFailure, secrets: &[String]) -> String {
     scrub(&raw, secrets)
 }
 
-/// `check`: at the limits phase, a refusal of every instance after the first
-/// ([`second_instances`]) — the sink states the `one_instance` mark, so the host asks it while
-/// the configuration is resolved; READY with nothing otherwise.
+/// `check`: an opened sink has no additional configuration limits. The host's trace producer
+/// can feed multiple independent collector instances.
 pub struct Check;
 
 impl SafeSlot for Check {
@@ -622,19 +618,11 @@ impl SafeSlot for Check {
     type State = Held<Otlp>;
     fn call(
         instance: Instance<'_, Held<Otlp>>,
-        input: Lent<'_, CheckIn>,
+        _: Lent<'_, CheckIn>,
         mut out: Out<'_, CheckOut>,
     ) -> Outcome {
-        let Some(h) = instance.get() else {
+        if instance.get().is_none() {
             return out.fail(Refusal::refused(NO_INSTANCE));
-        };
-        if input.phase != CHECK_PHASE_LIMITS {
-            return Outcome::Ready;
-        }
-        let lines = second_instances(&instance_names(input), ALIAS, ONE_INSTANCE);
-        if !lines.is_empty() {
-            let json = serde_json::to_vec(&lines).unwrap_or_default();
-            out.lease(|o| &o.findings, h.leases(), json, BLOB_JSON);
         }
         Outcome::Ready
     }

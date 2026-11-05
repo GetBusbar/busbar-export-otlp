@@ -78,13 +78,6 @@ use busbar_contract::abi::sdk::url::{self as sdk_url, cut_userinfo, Userinfo};
 pub use config::OtlpSettings;
 use zeroize::{Zeroize, Zeroizing};
 
-/// Why a second instance is refused, the tail of the limits check's line
-/// (`busbar_contract::abi::sdk::export::second_instances`): the sink states the `one_instance`
-/// mark, so each extra instance is refused, naming the first.
-pub const ONE_INSTANCE: &str =
-    "OTLP installs the ONE process-global tracer subscriber, so a second \
-     instance could only be silently ignored — keep a single instance.";
-
 /// The plugin's canonical name.
 pub const NAME: &str = "busbar-export-otlp";
 /// The module name an `export:` instance names it by.

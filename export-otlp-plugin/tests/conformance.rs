@@ -522,11 +522,17 @@ impl Host {
 
 /// The door, linked or dropped in, bound to `host`.
 fn load(host: &Host, dropped: bool) -> Plugin<Export> {
+    load_named(host, dropped, "traces")
+}
+
+fn load_named(host: &Host, dropped: bool, name: &str) -> Plugin<Export> {
+    let mut bind = host.bind();
+    bind.instance = Arc::from(name);
     if dropped {
-        load_dropped::<Export>(&cdylib(), &row().statement, host.bind())
+        load_dropped::<Export>(&cdylib(), &row().statement, bind)
             .expect("the dropped-in door loads")
     } else {
-        load_linked::<Export>(&row(), host.bind()).expect("the linked door loads")
+        load_linked::<Export>(&row(), bind).expect("the linked door loads")
     }
 }
 
@@ -1186,40 +1192,76 @@ fn check_through_the_door(
     (spelled(&called), text)
 }
 
-/// THE LIMITS-PHASE CHECK, DRIVEN THROUGH THE DOOR: with two instances at the limits phase the sink
-/// leases `second_instances`' one refusal (naming the second and the first); at the instances phase it
-/// has nothing to say whatever the instances. Both doors.
+/// Both doors admit two collectors and keep their delivery, refresh and close state separate.
 #[test]
-fn the_limits_check_refuses_a_second_instance_through_the_door() {
-    let expected = serde_json::to_string(&busbar_contract::abi::sdk::export::second_instances(
-        &["first".to_string(), "second".to_string()],
-        busbar_export_otlp::ALIAS,
-        busbar_export_otlp::ONE_INSTANCE,
-    ))
-    .unwrap();
-    assert!(
-        expected.contains("export.second") && expected.contains("'first'"),
-        "{expected}"
-    );
+fn multiple_collectors_deliver_independently_through_both_doors() {
     for dropped in [false, true] {
         let host = Host::new();
-        let p = load(&host, dropped);
-        assert_eq!(open(&p, COLLECTOR), "Ready ");
-        let (outcome, findings) =
-            check_through_the_door(&p, export::CHECK_PHASE_LIMITS, &["first", "second"]);
-        assert_eq!(outcome, "Ready ", "dropped={dropped}");
+        let first = load_named(&host, dropped, "first");
+        let second = load_named(&host, dropped, "second");
         assert_eq!(
-            findings.as_deref(),
-            Some(expected.as_str()),
+            open(&first, r#"{"url":"http://127.0.0.1:4318/first"}"#),
+            "Ready "
+        );
+        assert_eq!(
+            open(&second, r#"{"url":"http://127.0.0.1:4318/second"}"#),
+            "Ready "
+        );
+        for p in [&first, &second] {
+            for phase in [export::CHECK_PHASE_LIMITS, export::CHECK_PHASE_INSTANCES] {
+                let (outcome, findings) = check_through_the_door(p, phase, &["first", "second"]);
+                assert_eq!(outcome, "Ready ", "dropped={dropped}");
+                assert_eq!(
+                    findings, None,
+                    "two collectors are permitted, dropped={dropped}"
+                );
+            }
+        }
+        let span = record("0000000000000011", None);
+        for p in [&first, &second] {
+            assert_eq!(deliver(&host, p, std::slice::from_ref(&span)), "Ready ");
+        }
+        assert_eq!(
+            spelled(&calls::refresh(
+                &first,
+                &host.d,
+                br#"{"url":"http://127.0.0.1:4318/moved"}"#,
+            )),
+            "Ready "
+        );
+        for p in [&first, &second] {
+            assert_eq!(deliver(&host, p, std::slice::from_ref(&span)), "Ready ");
+        }
+        assert_eq!(close(&first), "Ready ");
+        assert_eq!(
+            deliver(&host, &second, std::slice::from_ref(&span)),
+            "Ready "
+        );
+        assert_eq!(close(&second), "Ready ");
+
+        let carried = host.collector.carried.lock().unwrap().clone();
+        let targets: Vec<_> = carried
+            .iter()
+            .map(|c| c["target"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                "http://127.0.0.1:4318/first",
+                "http://127.0.0.1:4318/second",
+                "http://127.0.0.1:4318/moved",
+                "http://127.0.0.1:4318/second",
+                "http://127.0.0.1:4318/second",
+            ],
             "dropped={dropped}"
         );
-        let (outcome, findings) =
-            check_through_the_door(&p, export::CHECK_PHASE_INSTANCES, &["first", "second"]);
-        assert_eq!(outcome, "Ready ", "dropped={dropped}");
-        assert_eq!(findings, None, "no finding at the instances phase");
-        let (_, findings) = check_through_the_door(&p, export::CHECK_PHASE_LIMITS, &["first"]);
-        assert_eq!(findings, None, "one instance is no finding");
-        close(&p);
+        let bodies = otlp_bodies(&json!({"carried": carried}));
+        assert_eq!(bodies.len(), 5);
+        for body in bodies {
+            let spans = &body.resource_spans[0].scope_spans[0].spans;
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].span_id, vec![0, 0, 0, 0, 0, 0, 0, 0x11]);
+        }
     }
 }
 
