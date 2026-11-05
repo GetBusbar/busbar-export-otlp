@@ -95,6 +95,7 @@ const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 
 /// This plugin's Statement: its name and version, the `traces` stream, the alias and the collector need.
 pub const STATEMENT: Statement = Statement {
+    settings_schema: Blob::json(include_bytes!("../settings.schema.json")),
     extensions: EXTENSIONS,
     kind_tail: (&TAIL as *const Tail).cast::<KindTailHead>(),
     needs: NEEDS.as_ptr(),
@@ -204,7 +205,11 @@ impl Endpoint {
                 authorization: authorization.map(|value| {
                     Cred::take(&mut serde_json::Value::String(value))
                         .unwrap_or_else(Cred::empty)
-                        .secure_for(&clean)
+                        .require_secure_if(
+                            clean
+                                .split_once("://")
+                                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+                        )
                 }),
             },
             collector: clean,

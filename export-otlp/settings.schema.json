@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "otlp settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "url"
+  ],
+  "properties": {
+    "url": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/reference"
+        }
+      ],
+      "description": "Required OTLP/HTTP collector URL, literal or env/file/module reference resolved by the host. Ambiguous credential-bearing URLs are refused by validate/open; URL and destination admission belong to the host."
+    }
+  },
+  "$defs": {
+    "reference": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "env"
+          ],
+          "properties": {
+            "env": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file"
+          ],
+          "properties": {
+            "file": {
+              "type": "string",
+              "pattern": "\\S"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "module"
+          ],
+          "properties": {
+            "module": {
+              "type": "string",
+              "pattern": "\\S"
+            },
+            "settings": {
+              "type": "object"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -7,7 +7,7 @@
       { "settings": { "url": "https://collector.example/v1/traces", "bogus": 1 },
         "refusal": "settings: unknown field `bogus`, expected `url`" },
       { "settings": { "url": 5 },
-        "refusal": "settings: invalid type: integer `5`, expected a string" }
+        "refusal": "settings: invalid type: number, expected a string" }
     ],
     "deliver": [
       { "stream": "traces",

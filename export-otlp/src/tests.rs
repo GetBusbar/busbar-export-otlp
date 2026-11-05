@@ -1032,3 +1032,82 @@ fn nonfinite_marker_support_preserves_finite_numbers() {
         assert_eq!(actual.to_bits(), value.to_bits());
     }
 }
+
+/// Schema consumers and the lifecycle agree on literal settings and the host's declared
+/// reference shapes. URL admission remains the need's host policy, rather than a schema format.
+#[test]
+#[allow(unsafe_code)]
+fn settings_schema_matches_lifecycle() {
+    use busbar_contract::abi::mechanism::{call::BLOB_JSON, door::Door};
+    // SAFETY: the linked door and its Statement/schema are static program data.
+    let statement = unsafe { &*Door::read_parts(crate::door::door()).statement };
+    let blob = &statement.settings_schema;
+    assert_eq!(blob.fmt, BLOB_JSON);
+    assert_eq!(blob.flags, 0);
+    assert!(!blob.ptr.is_null());
+    // SAFETY: this is the immutable schema published by the linked door above.
+    let bytes = unsafe { std::slice::from_raw_parts(blob.ptr, blob.len) };
+    assert_eq!(bytes, include_bytes!("../settings.schema.json"));
+    let schema: serde_json::Value = serde_json::from_slice(bytes).expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("valid JSON Schema");
+
+    assert_eq!(schema["required"], json!(["url"]));
+    for (settings, accepted) in [
+        (json!({"url":"http://localhost:4318/v1/traces"}), true),
+        (
+            json!({"url":"https://user:pass@collector.example/v1/traces"}),
+            true,
+        ),
+        (json!({"url":""}), true),
+        (json!({}), false),
+        (json!({"url":null}), false),
+        (json!({"url":2}), false),
+        (
+            json!({"url":"https://collector.example/", "extra":true}),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            validator.is_valid(&settings),
+            accepted,
+            "schema: {settings}"
+        );
+        assert_eq!(
+            Otlp::validate(settings.to_string().as_bytes()).is_ok(),
+            accepted,
+            "lifecycle: {settings}"
+        );
+    }
+    for (reference, accepted) in [
+        (json!({"env":"OTLP_URL"}), true),
+        (json!({"file":"/run/secrets/otlp-url"}), true),
+        (
+            json!({"module":"vault", "settings":{"key":"collector"}}),
+            true,
+        ),
+        (json!({"module":"vault"}), true),
+        (json!({"env":" "}), false),
+        (json!({"module":""}), false),
+        (json!({"env":"X", "extra":true}), false),
+        (json!({"env":"X", "file":"Y"}), false),
+    ] {
+        let mut settings = json!({"url":reference});
+        assert_eq!(
+            validator.is_valid(&settings),
+            accepted,
+            "reference schema: {settings}"
+        );
+        busbar_contract::secret_fields::resolve_references(
+            &mut settings,
+            &[],
+            &["url".to_string()],
+            |_, _| Ok("http://localhost:4318/v1/traces".to_string()),
+        )
+        .expect("host resolves declared references");
+        assert_eq!(
+            Otlp::validate(settings.to_string().as_bytes()).is_ok(),
+            accepted,
+            "resolved lifecycle: {settings}"
+        );
+    }
+}

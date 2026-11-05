@@ -85,13 +85,22 @@ pub fn open_resumed(p: &Plugin<Export>, d: &Dispatcher, settings: &[u8]) -> Call
         bytes,
     )
 }
-pub fn refresh(p: &Plugin<Export>, settings: &[u8]) -> Called {
+/// Delivery completion can precede the worker's deferred admission release. Submit refresh
+/// through the dispatcher so it waits for that release instead of racing a ticketless call.
+pub fn refresh(p: &Plugin<Export>, d: &Dispatcher, settings: &[u8]) -> Called {
+    let bytes = Arc::new(settings.to_vec());
     let mut i: RefreshIn = blank_in();
-    i.settings = json(settings);
+    i.settings = json(&bytes);
     i.generation = 2;
-    p.call(
+    let deadline = busbar_plugin_loader::dispatch::now_ns().saturating_add(30_000_000_000);
+    on_ticket(
+        p,
+        d,
         lifecycle::slot::REFRESH,
-        &mut Frame::new(i, blank_out::<OutHead>()),
+        Frame::new(i, blank_out::<OutHead>()),
+        DeadlineClass::Call,
+        deadline,
+        bytes,
     )
 }
 

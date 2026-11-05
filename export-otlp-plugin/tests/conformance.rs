@@ -38,9 +38,7 @@ use busbar_contract::abi::host::conn::connector::EGRESS_LOOPBACK_ALLOWED;
 use busbar_contract::abi::mechanism::call::{
     Blob, DeadlineClass, InHead, OutHead, BLOB_JSON, BLOB_JSONL, DIAG_LOG,
 };
-use busbar_contract::abi::mechanism::lifecycle::{
-    slot as lc, OpenIn, OpenOut, RefreshIn, ValidateIn,
-};
+use busbar_contract::abi::mechanism::lifecycle::{slot as lc, OpenIn, OpenOut, ValidateIn};
 use busbar_contract::abi::mechanism::rendering::{ReadNeed, RENDERING_MAGIC};
 use busbar_contract::abi::sdk::door::{blank_in, blank_out};
 use busbar_contract::conn::{
@@ -106,13 +104,29 @@ type Declared = (u32, Option<String>);
 /// every request it was handed, and the reply each connection reads.
 #[derive(Default)]
 struct Collector {
-    slab: ConnSlab<()>,
+    slab: ConnSlab<Mutex<Prepared>>,
+    profile: CarrierProfile,
     /// Per `(instance, need)`: its egress class and declared target.
     declared: Mutex<HashMap<(InstanceId, NeedId), Declared>>,
     carried: Mutex<Vec<Value>>,
     replies: Mutex<HashMap<ConnId, VecDeque<Piece>>>,
     /// The body bytes each connection's `Body` pieces fill the read buffer with, in order.
     bodies: Mutex<HashMap<ConnId, VecDeque<Vec<u8>>>>,
+}
+
+/// Scripted established carrier evidence, deliberately independent of the target URL.
+#[derive(Clone, Copy, Default)]
+enum CarrierProfile {
+    #[default]
+    Clear,
+    Missing,
+    Secure,
+}
+
+struct Prepared {
+    need: NeedId,
+    target: String,
+    committed: bool,
 }
 
 /// The egress verdict on `target` under `class`.
@@ -133,7 +147,7 @@ fn piece(kind: PieceKind, code: Option<u32>) -> Piece {
         end: true,
         status: None,
         status_code: code,
-        status_namespace: None,
+        status_namespace: code.map(|_| "http".to_owned()),
         retry_after_secs: None,
         fault: None,
         reason: None,
@@ -146,6 +160,58 @@ fn hex(octets: &[u8]) -> String {
 }
 
 impl DeclaredConns for Collector {
+    fn prepare_request(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        _: u64,
+    ) -> Result<ConnId, ConnError> {
+        let (class, declared) = self
+            .declared
+            .lock()
+            .unwrap()
+            .get(&(caller, need))
+            .cloned()
+            .ok_or(ConnError::UndeclaredNeed)?;
+
+        let target = if desc.target.is_empty() {
+            declared.unwrap_or_default()
+        } else {
+            desc.target.to_owned()
+        };
+        judge(class, Some(&target))?;
+        self.slab.insert(
+            caller,
+            need,
+            Mutex::new(Prepared {
+                need,
+                target,
+                committed: false,
+            }),
+        )
+    }
+
+    fn commit_request(
+        &self,
+        caller: InstanceId,
+        conn: ConnId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+    ) -> Result<(), ConnError> {
+        let (_, entry) = self.slab.get(caller, conn)?;
+        let mut prepared = entry.lock().unwrap();
+        if prepared.committed || (!desc.target.is_empty() && desc.target != prepared.target) {
+            return Err(ConnError::Refused);
+        }
+        if require_secure && !matches!(self.profile, CarrierProfile::Secure) {
+            return Err(ConnError::AuthRefused);
+        }
+        prepared.committed = true;
+        self.capture(conn, prepared.need, &prepared.target, desc);
+        Ok(())
+    }
+
     fn declare(
         &self,
         owner: InstanceId,
@@ -180,27 +246,8 @@ impl DeclaredConns for Collector {
     }
 }
 
-impl Conns for Collector {
-    fn open(
-        &self,
-        caller: InstanceId,
-        need: NeedId,
-        desc: &OpenDesc<'_>,
-    ) -> Result<ConnId, ConnError> {
-        let (class, declared) = self
-            .declared
-            .lock()
-            .unwrap()
-            .get(&(caller, need))
-            .cloned()
-            .ok_or(ConnError::UndeclaredNeed)?;
-
-        let target = if desc.target.is_empty() {
-            declared.unwrap_or_default()
-        } else {
-            desc.target.to_owned()
-        };
-        judge(class, Some(&target))?;
+impl Collector {
+    fn capture(&self, id: ConnId, need: NeedId, target: &str, desc: &OpenDesc<'_>) {
         self.carried.lock().unwrap().push(json!({
             "need": need.0,
             "target": target,
@@ -212,7 +259,6 @@ impl Conns for Collector {
             "timeout_ms": desc.timeout_ms,
             "body": hex(&desc.body),
         }));
-        let id = self.slab.insert(caller, need, ())?;
         let code =
             if desc.head_target.ends_with(b"/fail") || desc.head_target.ends_with(b"/bigfail") {
                 503
@@ -238,6 +284,18 @@ impl Conns for Collector {
         }
         pieces.push_back(piece(PieceKind::Completion, None));
         self.replies.lock().unwrap().insert(id, pieces);
+    }
+}
+
+impl Conns for Collector {
+    fn open(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+    ) -> Result<ConnId, ConnError> {
+        let id = self.prepare_request(caller, need, desc, desc.timeout_ms)?;
+        self.commit_request(caller, id, desc, false)?;
         Ok(id)
     }
 
@@ -280,13 +338,125 @@ impl Conns for Collector {
         Err(ConnError::Pending)
     }
 
-    fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
-        Err(ConnError::Closed)
+    fn facts(&self, caller: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
+        self.slab.get(caller, conn)?;
+        match self.profile {
+            CarrierProfile::Missing => Err(ConnError::Closed),
+            CarrierProfile::Clear => Ok(ConnFacts::default()),
+            CarrierProfile::Secure => Ok(ConnFacts {
+                peer_cert: Some(busbar_contract::transport::wire::CertFacts {
+                    subject: "scripted collector".into(),
+                    issuer: "scripted fixture".into(),
+                    fingerprint: "ab".repeat(32),
+                }),
+                ..ConnFacts::default()
+            }),
+        }
     }
 
     fn close(&self, c: InstanceId, id: ConnId) -> Result<(), ConnError> {
+        self.slab.remove(c, id)?;
         self.replies.lock().unwrap().remove(&id);
-        self.slab.remove(c, id).map(|_| ())
+        self.bodies.lock().unwrap().remove(&id);
+        Ok(())
+    }
+}
+
+#[test]
+fn prepared_collector_commits_once_on_the_owned_connection() {
+    let collector = Collector {
+        profile: CarrierProfile::Secure,
+        ..Collector::default()
+    };
+    let owner = InstanceId(1);
+    let need = NeedId(0);
+    collector.slab.declare(owner, need);
+    collector
+        .declared
+        .lock()
+        .unwrap()
+        .insert((owner, need), (EGRESS_LOOPBACK_ALLOWED, None));
+    let desc = OpenDesc {
+        target: "https://collector.example/v1/traces",
+        ..OpenDesc::default()
+    };
+    let conn = collector.prepare_request(owner, need, &desc, 0).unwrap();
+    assert!(collector.carried.lock().unwrap().is_empty());
+    assert!(collector.facts(owner, conn).unwrap().peer_cert.is_some());
+    assert!(matches!(
+        collector.facts(InstanceId(2), conn),
+        Err(ConnError::NotOwner)
+    ));
+    assert!(matches!(
+        collector.commit_request(InstanceId(2), conn, &desc, true),
+        Err(ConnError::NotOwner)
+    ));
+    let changed = OpenDesc {
+        target: "https://other.example/",
+        ..desc.clone()
+    };
+    assert!(matches!(
+        collector.commit_request(owner, conn, &changed, true),
+        Err(ConnError::Refused)
+    ));
+    assert!(collector.carried.lock().unwrap().is_empty());
+    collector.commit_request(owner, conn, &desc, true).unwrap();
+    assert!(collector.replies.lock().unwrap().contains_key(&conn));
+    assert!(matches!(
+        collector.commit_request(owner, conn, &desc, true),
+        Err(ConnError::Refused)
+    ));
+    assert_eq!(collector.carried.lock().unwrap().len(), 1);
+    collector.close(owner, conn).unwrap();
+    assert!(matches!(
+        collector.facts(owner, conn),
+        Err(ConnError::Closed)
+    ));
+}
+
+#[test]
+fn protected_collector_requests_require_explicit_carrier_evidence() {
+    for profile in [CarrierProfile::Clear, CarrierProfile::Missing] {
+        let collector = Collector {
+            profile,
+            ..Collector::default()
+        };
+        let owner = InstanceId(1);
+        let need = NeedId(0);
+        collector.slab.declare(owner, need);
+        collector
+            .declared
+            .lock()
+            .unwrap()
+            .insert((owner, need), (EGRESS_LOOPBACK_ALLOWED, None));
+        let desc = OpenDesc {
+            target: "https://collector.example/v1/traces",
+            ..OpenDesc::default()
+        };
+        let conn = collector.prepare_request(owner, need, &desc, 0).unwrap();
+        assert!(!collector
+            .facts(owner, conn)
+            .is_ok_and(|f| f.peer_cert.is_some()));
+        assert!(matches!(
+            collector.commit_request(owner, conn, &desc, true),
+            Err(ConnError::AuthRefused)
+        ));
+        assert!(collector.carried.lock().unwrap().is_empty());
+        assert!(collector.replies.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn protected_otlp_never_reaches_an_unproven_collector_through_either_door() {
+    for dropped in [false, true] {
+        for profile in [CarrierProfile::Clear, CarrierProfile::Missing] {
+            let host = Host::with_profile(profile);
+            let plugin = load(&host, dropped);
+            open(&plugin, FAILING);
+            deliver(&host, &plugin, &[record("0000000000000021", None)]);
+            assert!(host.collector.carried.lock().unwrap().is_empty());
+            close(&plugin);
+        }
     }
 }
 
@@ -319,13 +489,20 @@ struct Host {
 
 impl Host {
     fn new() -> Self {
+        Self::with_profile(CarrierProfile::Clear)
+    }
+
+    fn with_profile(profile: CarrierProfile) -> Self {
         Self {
             d: Arc::new(Dispatcher::new(DispatchConfig {
                 workers: 2,
                 watchdog_period: Duration::from_millis(20),
                 ..DispatchConfig::default()
             })),
-            collector: Arc::default(),
+            collector: Arc::new(Collector {
+                profile,
+                ..Collector::default()
+            }),
             lines: Arc::default(),
         }
     }
@@ -386,14 +563,6 @@ fn open(p: &Plugin<Export>, settings: &str) -> String {
     let mut out: OpenOut = blank_out();
     out.head = out_head();
     spelled(&p.call(lc::OPEN, &mut Frame::new(input, out)))
-}
-
-fn refresh(p: &Plugin<Export>, settings: &str) -> String {
-    let mut input: RefreshIn = blank_in();
-    input.head = in_head();
-    input.settings = blob(settings.as_bytes(), BLOB_JSON);
-    input.generation = 2;
-    spelled(&p.call(lc::REFRESH, &mut Frame::new(input, out_head())))
 }
 
 fn close(p: &Plugin<Export>) -> String {
@@ -493,7 +662,7 @@ fn deliver_ticketless(p: &Plugin<Export>) -> String {
 
 /// One door's whole script, as one comparable transcript.
 fn transcript(dropped: bool, settings: &str) -> Value {
-    let host = Host::new();
+    let host = Host::with_profile(CarrierProfile::Secure);
     let live = load(&host, dropped);
     let validated: Vec<String> = [
         "",
@@ -524,7 +693,7 @@ fn transcript(dropped: bool, settings: &str) -> Value {
         ),
         deliver_ticketless(&live),
     ];
-    let refreshed = refresh(&live, MOVED);
+    let refreshed = spelled(&calls::refresh(&live, &host.d, MOVED.as_bytes()));
     let moved = deliver(&host, &live, &[record("0000000000000013", None)]);
     let closed = close(&live);
 
@@ -910,7 +1079,7 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
 #[test]
 fn a_reply_past_the_bound_is_delivered_on_2xx_and_a_non_2xx_drop_otherwise() {
     for dropped in [false, true] {
-        let host = Host::new();
+        let host = Host::with_profile(CarrierProfile::Secure);
         let p = load(&host, dropped);
         open(&p, r#"{"url":"https://collector.example/big"}"#);
         deliver(&host, &p, &[record("0000000000000031", None)]);
@@ -1190,7 +1359,12 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
         assert_eq!(p.name(), "busbar-export-otlp");
         assert_eq!(p.max_inflight(), 64);
         pin("facts", 0);
-        for case in inputs["export"]["bad_settings"].as_array().unwrap() {
+        for (index, case) in inputs["export"]["bad_settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
             let bytes = case["settings"].to_string().into_bytes();
             let mut i: ValidateIn = blank_in();
             i.settings = calls::json(&bytes);
@@ -1201,10 +1375,25 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
                 lifecycle::slot::VALIDATE,
                 &mut Frame::new(i, blank_out::<OutHead>()),
             );
-            assert_eq!(c.outcome, Outcome::Failed);
-            assert_eq!(c.lease, 0);
-            assert!(String::from_utf8_lossy(c.error.as_deref().unwrap())
-                .contains(case["refusal"].as_str().unwrap()));
+            let route = if dropped { "dropped-in" } else { "linked" };
+            let expected = case["refusal"].as_str().expect("fixture refusal text");
+            assert_eq!(
+                c.outcome,
+                Outcome::Failed,
+                "{route} bad settings #{index}: {}",
+                calls::called(&c)
+            );
+            assert_eq!(
+                c.lease,
+                0,
+                "{route} bad settings #{index}: {}",
+                calls::called(&c)
+            );
+            let actual = String::from_utf8_lossy(c.error.as_ref().unwrap_or_else(|| {
+                panic!("{route} bad settings #{index}: missing refusal text; expected {expected:?}")
+            }));
+            assert!(actual.contains(expected),
+                "{route} bad settings #{index}: expected refusal substring {expected:?}, actual {actual:?}");
             observed.push(calls::called(&c));
             pin("validate bad", 1);
         }
@@ -1343,9 +1532,12 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
         );
         pin("tick", 1);
         let bad = inputs["export"]["bad_settings"][0]["settings"].to_string();
-        assert_eq!(calls::refresh(&p, bad.as_bytes()).outcome, Outcome::Failed);
+        assert_eq!(
+            calls::refresh(&p, &d, bad.as_bytes()).outcome,
+            Outcome::Failed
+        );
         pin("refresh bad", 1);
-        assert_eq!(calls::refresh(&p, &settings).outcome, Outcome::Ready);
+        assert_eq!(calls::refresh(&p, &d, &settings).outcome, Outcome::Ready);
         pin("refresh", 1);
         assert_eq!(deliver().outcome, Outcome::Ready);
         pin("deliver after refresh", 1);
