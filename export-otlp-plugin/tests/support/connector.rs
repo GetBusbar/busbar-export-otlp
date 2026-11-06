@@ -26,7 +26,11 @@ fn transport_dispatcher() -> Arc<Dispatcher> {
     static DISPATCHER: OnceLock<Arc<Dispatcher>> = OnceLock::new();
     DISPATCHER
         .get_or_init(|| {
-            let dispatcher = Dispatcher::new(DispatchConfig::default());
+            // Request-head deadlines cross the transport ABI using its host clock.
+            let dispatcher = Dispatcher::with_services(
+                DispatchConfig::default(),
+                Arc::new(busbar_kernel::host_services::KernelServices::new()),
+            );
             let _ = dispatcher.lend_seal(busbar_kernel::seal::lend());
             dispatcher.install_runtime(runtime());
             dispatcher.install_io(busbar_core_connector::hostio::process());
