@@ -7,12 +7,13 @@
 //! `busbar_contract::abi::sdk::life::settings_value` (empty settings are `{}`, so they are refused
 //! for the missing `url`, not as JSON that ended early).
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
 /// `settings:` of an `export.<name>.module: otlp` instance. Its `Debug` names the url as every line
-/// the sink writes names it ([`crate::log_target`]): userinfo, a non-OTLP path and the query masked.
-#[derive(Deserialize, Serialize, Clone, PartialEq)]
+/// the sink writes names it: userinfo, a non-OTLP path and the query masked. It is not `Serialize`:
+/// the url can carry a credential.
+#[derive(Deserialize, Clone, PartialEq)]
 #[serde(from = "ParsedSettings")]
 pub struct OtlpSettings {
     /// OTLP/HTTP traces endpoint URL (e.g. `http://localhost:4318/v1/traces`) — REQUIRED. When an

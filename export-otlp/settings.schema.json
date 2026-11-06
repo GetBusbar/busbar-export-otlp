@@ -16,7 +16,7 @@
           "$ref": "#/$defs/reference"
         }
       ],
-      "description": "Required OTLP/HTTP collector URL, literal or env/file/module reference resolved by the host. Ambiguous credential-bearing URLs are refused by validate/open; URL and destination admission belong to the host."
+      "description": "Required OTLP/HTTP traces endpoint URL (e.g. https://collector.example:4318/v1/traces), posted to exactly as written: no /v1/traces is appended. Literal or env/file/module reference resolved by the host. Ambiguous credential-bearing URLs are refused by validate/open; URL and destination admission belong to the host."
     }
   },
   "$defs": {

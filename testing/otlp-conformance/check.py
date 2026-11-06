@@ -13,7 +13,7 @@ one canonical form and compared exactly.
 """
 import copy, json, re, sys
 
-HEX16 = re.compile(r"^[0-9a-fA-F]{16}$")
+HEX16 = re.compile(r"[0-9a-fA-F]{16}")
 ATTRS = ["pool", "ingress", "op", "lane", "provider", "model"]
 
 
@@ -35,7 +35,7 @@ def val(v):
 
 
 def sid(x):
-    if isinstance(x, str) and HEX16.match(x) and int(x, 16) != 0:
+    if isinstance(x, str) and HEX16.fullmatch(x) and int(x, 16) != 0:
         return x.lower()
     return None
 
@@ -134,7 +134,7 @@ def compare(fixture, traces):
     problems = []
     if not want:
         return ["the fixture holds no span: nothing to compare"]
-    for res, scope, _ in got:
+    for res, _, _ in got:
         if res != [("service.name", ("str", "busbar"))]:
             problems.append(f"resource is {res}, not service.name=busbar")
             break
@@ -153,7 +153,7 @@ def compare(fixture, traces):
         for k in w:
             if w[k] != g[k]:
                 problems.append(f"span {w['name']}: {k} arrived as {g[k]!r}, sent {w[k]!r}")
-    for (t, s), g in by.items():
+    for (_, s), g in by.items():
         problems.append(f"unexpected span {s} ({g['name']}) arrived")
     return problems
 

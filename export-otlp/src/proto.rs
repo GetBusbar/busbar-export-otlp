@@ -15,9 +15,9 @@ use prost::Message as _;
 use serde_json::Value;
 
 /// The OTLP resource's `service.name`, and the instrumentation scope's name.
-pub const SERVICE: &str = "busbar";
+const SERVICE: &str = "busbar";
 /// The record fields that become span attributes, in the order they are written.
-pub const ATTRIBUTES: [&str; 6] = [
+const ATTRIBUTES: [&str; 6] = [
     ExportField::Pool.as_token(),
     ExportField::Ingress.as_token(),
     ExportField::Op.as_token(),
@@ -40,7 +40,8 @@ const HEX_RADIX: u32 = 16;
 const INVALID_RECORD_ID: u64 = 0;
 
 /// Full-span JSON vocabulary emitted by busbar-kernel's export/traces.rs
-/// SpanRecord::finish, key_values and Producer::on_event. Projected fields use
+/// SpanRecord::finish, key_values and Producer::on_event, and the host's non-finite double marker
+/// (an exact one-member object). Projected fields use
 /// ExportField::as_token instead of duplicating the contract's vocabulary.
 mod span_record {
     pub(super) const KEY: &str = "key";
@@ -54,6 +55,7 @@ mod span_record {
     pub(super) const ERROR: &str = "error";
     pub(super) const START_NS: &str = "start_ns";
     pub(super) const END_NS: &str = "end_ns";
+    pub(super) const NON_FINITE_F64: &str = "$busbar_f64";
 }
 
 /// `SPAN_KIND_INTERNAL`.
@@ -135,7 +137,8 @@ struct ExportTraceServiceResponse {
 struct ExportTracePartialSuccess {
     #[prost(int64, tag = "1")]
     rejected_spans: i64,
-    /// Bytes on the wire as a string is: a message that is not UTF-8 must not lose the count.
+    /// A proto `string`, read as bytes (same wire type) so a message that is not UTF-8 cannot fail
+    /// the decode and lose the rejected count.
     #[prost(bytes = "vec", tag = "2")]
     error_message: Vec<u8>,
 }
@@ -184,7 +187,7 @@ const STATUS_CODE_ERROR: i32 = 2;
 
 /// The reserved member of a `traces` line carrying the full span record (the host hands it to a
 /// sink that takes span records).
-pub const SPAN_MEMBER: &str = "span";
+const SPAN_MEMBER: &str = "span";
 
 /// `ArrayValue` (common/v1).
 #[derive(Clone, PartialEq, prost::Message)]
@@ -265,7 +268,10 @@ fn any_value(value: &Value) -> Option<AnyValueKind> {
                 .collect(),
         }),
         Value::Object(object) if object.len() == 1 => {
-            match object.get("$busbar_f64").and_then(Value::as_str) {
+            match object
+                .get(span_record::NON_FINITE_F64)
+                .and_then(Value::as_str)
+            {
                 Some("NaN") => AnyValueKind::Double(f64::NAN),
                 Some("inf") => AnyValueKind::Double(f64::INFINITY),
                 Some("-inf") => AnyValueKind::Double(f64::NEG_INFINITY),
@@ -357,14 +363,8 @@ fn full_span(full: &Value) -> Option<Span> {
     })
 }
 
-/// The encoded `ExportTraceServiceRequest` carrying each of `records` that is a span, in order, or
-/// `None` when none of them carries a usable span identity.
-pub fn export_request<'a>(records: impl IntoIterator<Item = &'a Value>) -> Option<Vec<u8>> {
-    encode(records.into_iter().filter_map(span).collect())
-}
-
-/// The encoded `ExportTraceServiceRequest` carrying `spans` (each built once by [`span`]), or `None`
-/// when there are none.
+/// The encoded `ExportTraceServiceRequest` carrying `spans` (each built once by [`span`]), in order,
+/// or `None` when there are none.
 pub(crate) fn encode(spans: Vec<Span>) -> Option<Vec<u8>> {
     if spans.is_empty() {
         return None;
@@ -383,11 +383,6 @@ pub(crate) fn encode(spans: Vec<Span>) -> Option<Vec<u8>> {
         }],
     };
     Some(request.encode_to_vec())
-}
-
-/// Whether `record` carries a usable span identity (it is a span [`export_request`] encodes).
-pub fn is_span(record: &Value) -> bool {
-    span(record).is_some()
 }
 
 /// The record's `Span` message: from its full span record where the host handed one (its `span`
@@ -415,8 +410,8 @@ pub(crate) fn span(record: &Value) -> Option<Span> {
     })
 }
 
-/// A record's span id — 16 hex digits — as its 8 big-endian bytes; `None` when it is not one, or
-/// is zero (the invalid id in OTLP).
+/// A record's trace or span id — 16 hex digits — as its 8 big-endian bytes; `None` when it is not
+/// one, or is zero (the invalid id in OTLP).
 fn id(value: &Value) -> Option<[u8; RECORD_ID_BYTES]> {
     let text = value.as_str()?;
     if text.len() != RECORD_ID_HEX_DIGITS || !text.bytes().all(|b| b.is_ascii_hexdigit()) {

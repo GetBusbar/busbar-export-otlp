@@ -51,12 +51,11 @@ pub(crate) const TARGET_FROM: &str = "settings.url";
 /// The one need's index in [`STATEMENT`]'s needs.
 pub const NEED: u32 = 0;
 
-/// The collector, reached through the host: framed `http`, under the `loopback-allowed` egress class
-/// the exporter holds its endpoint to, its target the `url` setting: the
-/// host declares the need pinned to the operator's collector, its userinfo left out, and refuses a
-/// dial to any other host. Each export names the same collector ([`Endpoint::collector`], the URL
-/// with its userinfo stripped), so no credential is ever part of what the host dials; the userinfo
-/// travels only as the request's `Authorization`.
+/// The collector, reached through the host: framed `http` under the `loopback-allowed` egress class,
+/// its target read from the `url` setting. The host declares the need pinned to the operator's
+/// collector, its userinfo left out, and refuses a dial to any other host. Each export names the
+/// same collector ([`Endpoint::collector`], the URL with its userinfo stripped), so no credential is
+/// ever part of what the host dials; the userinfo travels only as the request's `Authorization`.
 pub(crate) const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_LOOPBACK_ALLOWED,
@@ -449,8 +448,7 @@ impl Life for Otlp {
 /// The OTLP request a JSON-lines batch makes, each line that is no span skipped (one warn line per
 /// kind of skip and batch, `records` the lines it skipped, so a bad batch cannot flood the log): the
 /// one pipeline from a `traces` batch to its request, the door's delivery and the conformance
-/// driver both (a record encodes through [`proto::span`] and [`proto::encode`], as
-/// [`proto::export_request`] does for records already parsed).
+/// driver both (a record encodes through [`proto::span`] and [`proto::encode`]).
 pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
     let mut spans = Vec::new();
     let (mut not_json, mut no_identity) = (0usize, 0usize);

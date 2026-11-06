@@ -114,6 +114,63 @@ fn a_stale_refusal_writes_no_settling_line_and_names_the_old_endpoint() {
     assert!(!otlp.run().refused());
 }
 
+/// A stale 2xx or non-2xx answer settles nothing, yet still reports what the collector said, naming
+/// the OLD endpoint: a partial rejection, and a non-2xx drop.
+#[test]
+fn a_stale_reply_settles_nothing_but_reports_the_old_endpoints_collector() {
+    use busbar_contract::abi::sdk::exchange::ExchangeResponse;
+    use opentelemetry_proto::tonic::collector::trace::v1::{
+        ExportTracePartialSuccess, ExportTraceServiceResponse,
+    };
+    use prost::Message as _;
+
+    let at = |url: &str| Endpoint::of(&crate::OtlpSettings { url: url.into() });
+    let otlp = Otlp {
+        run: RwLock::new(Otlp::start(at("https://a.example/v1/traces"))),
+    };
+    let parked = otlp.run();
+    *otlp.run.write().unwrap_or_else(PoisonError::into_inner) =
+        Otlp::start(at("https://b.example/v1/traces"));
+
+    let rejected = ExportTraceServiceResponse {
+        partial_success: Some(ExportTracePartialSuccess {
+            rejected_spans: 3,
+            error_message: "too old".into(),
+        }),
+    }
+    .encode_to_vec();
+    let partial = Ok(ExchangeResponse {
+        status: 200,
+        body: rejected,
+        ..ExchangeResponse::default()
+    });
+    assert_eq!(
+        captured(|| otlp.settle(&parked, &partial)),
+        [(
+            tracing::Level::WARN,
+            "OTLP collector rejected part of this batch: \"too old\"".to_string(),
+            " diag=BUSBAR-7143 endpoint=https://a.example/v1/traces rejected_spans=3".to_string()
+        )],
+        "a stale 2xx reports its rejection for the old endpoint, with no settling line"
+    );
+
+    let non_2xx = Ok(ExchangeResponse {
+        status: 503,
+        ..ExchangeResponse::default()
+    });
+    assert_eq!(
+        captured(|| otlp.settle(&parked, &non_2xx)),
+        [(
+            tracing::Level::WARN,
+            "OTLP span export returned a non-2xx status; this batch was dropped".to_string(),
+            " diag=BUSBAR-7141 endpoint=https://a.example/v1/traces status=503".to_string()
+        )]
+    );
+
+    assert_eq!(*parked.admitted.lock().expect("lock"), None);
+    assert_eq!(*otlp.run().admitted.lock().expect("lock"), None);
+}
+
 const CANARY: &str = "CANARY5e81bc";
 
 /// Every line logged while one instance's exports are carried, refused and dropped, for a target

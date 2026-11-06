@@ -15,6 +15,8 @@ COMMAND_SECONDS = 3
 TEST_WAIT_SECONDS = 10
 FIXTURE_FAILSAFE_SECONDS = TEST_WAIT_SECONDS * 2
 TIMEOUT_EXIT = 124
+UNAVAILABLE_EXIT = 127
+USAGE_EXIT = 2
 SIGNAL_EXIT_OFFSET = 128
 FIXTURE_EXIT = 7
 READY = "command and child started"
@@ -32,6 +34,30 @@ time.sleep({seconds})
 class CommandTests(unittest.TestCase):
     def command(self, seconds, program):
         return [sys.executable, "-I", str(HELPER), str(seconds), sys.executable, "-c", program]
+
+    def test_a_command_that_cannot_start_exits_unavailable(self):
+        missing = str(Path(__file__).with_name("no-such-program"))
+        result = subprocess.run(
+            [sys.executable, "-I", str(HELPER), str(TEST_WAIT_SECONDS), missing],
+            capture_output=True, text=True, timeout=TEST_WAIT_SECONDS,
+        )
+        self.assertEqual(result.returncode, UNAVAILABLE_EXIT)
+        self.assertIn("cannot start", result.stderr)
+
+    def test_the_deadline_must_be_positive_whole_seconds_and_a_command_is_required(self):
+        for seconds in ["0", "-1", "1.5", "inf", "x"]:
+            result = subprocess.run(
+                [sys.executable, "-I", str(HELPER), seconds, sys.executable, "-c", "pass"],
+                capture_output=True, text=True, timeout=TEST_WAIT_SECONDS,
+            )
+            self.assertEqual(result.returncode, USAGE_EXIT, seconds)
+            self.assertIn("timeout must be positive whole seconds", result.stderr, seconds)
+        result = subprocess.run(
+            [sys.executable, "-I", str(HELPER), str(TEST_WAIT_SECONDS)],
+            capture_output=True, text=True, timeout=TEST_WAIT_SECONDS,
+        )
+        self.assertEqual(result.returncode, USAGE_EXIT)
+        self.assertIn("a command is required", result.stderr)
 
     def test_success_preserves_output_and_the_commands_exit_status(self):
         result = subprocess.run(

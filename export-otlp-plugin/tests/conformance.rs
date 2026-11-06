@@ -452,11 +452,22 @@ fn protected_otlp_never_reaches_an_unproven_collector_through_either_door() {
         for profile in [CarrierProfile::Clear, CarrierProfile::Missing] {
             let host = Host::with_profile(profile);
             let plugin = load(&host, dropped);
-            open(&plugin, FAILING);
-            deliver(&host, &plugin, &[record("0000000000000021", None)]);
+            assert_eq!(open(&plugin, FAILING), "Ready ");
+            assert_eq!(
+                deliver(&host, &plugin, &[record("0000000000000021", None)]),
+                "Ready "
+            );
             assert!(host.collector.carried.lock().unwrap().is_empty());
             close(&plugin);
         }
+        // The control: the same delivery over proven carrier evidence is carried, so the refusal
+        // above is the carrier's, not a delivery that never reached the connector.
+        let host = Host::with_profile(CarrierProfile::Secure);
+        let plugin = load(&host, dropped);
+        assert_eq!(open(&plugin, FAILING), "Ready ");
+        deliver(&host, &plugin, &[record("0000000000000021", None)]);
+        assert_eq!(host.collector.carried.lock().unwrap().len(), 1);
+        close(&plugin);
     }
 }
 
@@ -1548,25 +1559,25 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
         if c.lease != 0 {
             leases.push(c.lease);
         }
-        let unique: std::collections::BTreeSet<_> = leases.iter().collect();
-        assert_eq!(unique.len(), leases.len());
+        // The sink's status and check answers are empty and its serve is refused: it lends no
+        // result blob, so the host has no lease to release, and one it never lent is refused.
+        assert_eq!(
+            leases,
+            Vec::<u64>::new(),
+            "the otlp sink lends no result blob"
+        );
         pin("own leases", 0);
-        let release = |lease| {
-            let mut i: ReleaseIn = blank_in();
-            i.lease = lease;
+        let mut i: ReleaseIn = blank_in();
+        i.lease = 1;
+        assert_eq!(
             p.call(
                 lifecycle::slot::RELEASE,
                 &mut Frame::new(i, blank_out::<OutHead>()),
             )
-        };
-        for &lease in &leases {
-            assert_eq!(release(lease).outcome, Outcome::Ready);
-            pin("release", 1);
-        }
-        if let Some(&lease) = leases.first() {
-            assert_eq!(release(lease).outcome, Outcome::Refused);
-            pin("release again", 1);
-        }
+            .outcome,
+            Outcome::Refused
+        );
+        pin("release unlent", 1);
         let mut tick = Frame::new(blank_in::<TickIn>(), blank_out::<TickOut>());
         assert_eq!(
             p.call(lifecycle::slot::TICK, &mut tick).outcome,

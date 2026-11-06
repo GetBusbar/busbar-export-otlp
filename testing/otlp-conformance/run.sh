@@ -54,7 +54,11 @@ json.dump({"suite": "otlp", "status": status, "armed": armed == "true",
 PY
 }
 
-NET="otlpconf-$$"
+# Docker names are global to the daemon: the PID alone can repeat across hosts or PID namespaces
+# sharing one daemon, and cleanup removes by name, so each run's names carry a random part too.
+RUN="otlpconf-$$-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+[ "$RUN" != "otlpconf-$$-" ] || { verdict fail true "no random run id for the docker names"; exit 1; }
+NET="$RUN"
 CONTAINERS=()
 NETWORK_REGISTERED=0
 RUNNING_TOOL=
@@ -124,7 +128,7 @@ run_tool docker network create "$NET" >/dev/null || { verdict fail true "docker 
 
 # collector_start <name>: a fresh collector; sets PORT (host-published OTLP/HTTP).
 collector_start() {
-  local name="otlpconf-$$-$1"
+  local name="$RUN-$1"
   CONTAINERS+=("$name")
   run_tool docker create --name "$name" --network "$NET" --network-alias collector --user 0:0 \
     -p 127.0.0.1::4318 "$COLLECTOR_IMAGE" --config /conf.yaml >/dev/null || return 1
@@ -146,7 +150,7 @@ collector_start() {
 
 # collector_finish <name> <dir> <signals...>: stop gracefully, copy the required signal files out.
 collector_finish() {
-  local name="otlpconf-$$-$1" dir="$2" failed=0 f
+  local name="$RUN-$1" dir="$2" failed=0 f
   shift 2
   mkdir -p "$dir" || return 1
   sleep "$COLLECTOR_FLUSH_SECONDS"
@@ -181,7 +185,7 @@ if collector_start control; then
     if [ "$proto" = grpc ]; then ep=collector:4317; else ep=collector:4318; flag+=(--otlp-http); fi
     for sig in traces metrics logs; do
       count=(--"$sig" 5)
-      generator="otlpconf-$$-telemetrygen-$proto-$sig"
+      generator="$RUN-telemetrygen-$proto-$sig"
       CONTAINERS+=("$generator")
       run_tool docker run --rm --name "$generator" --network "$NET" "$TELEMETRYGEN_IMAGE" "$sig" --otlp-endpoint "$ep" "${flag[@]}" \
         --service "ctl-$proto" "${count[@]}" --rate 0 >"$OUT/work/telemetrygen-$proto-$sig.log" 2>&1 \

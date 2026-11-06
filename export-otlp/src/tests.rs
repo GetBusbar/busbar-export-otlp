@@ -28,6 +28,18 @@ pub(crate) fn base64(input: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(input)
 }
 
+/// The request the sink's one pipeline ([`door::batch_body`]) builds for `records`, each its own
+/// JSON line, as the host hands a `traces` batch.
+fn export_request<'a>(records: impl IntoIterator<Item = &'a serde_json::Value>) -> Option<Vec<u8>> {
+    let batch: String = records.into_iter().map(|r| format!("{r}\n")).collect();
+    door::batch_body(batch.as_bytes())
+}
+
+/// Whether the sink takes `record` as a span (it has a usable span identity).
+fn is_span(record: &serde_json::Value) -> bool {
+    proto::span(record).is_some()
+}
+
 #[test]
 fn parseable_url_fragments_stay_out_of_diagnostics_even_when_echoed_separately() {
     let url = "https://collector.example/v1/traces#fragment%2Dcredential";
@@ -92,7 +104,7 @@ fn a_traces_record_is_one_otlp_span_every_field_in_its_place() {
         "pool": "p1", "ingress": "openai", "op": "chat", "lane": "l0",
         "provider": "mock", "model": "m1",
     });
-    let bytes = proto::export_request([&record]).expect("a span");
+    let bytes = export_request([&record]).expect("a span");
     let mut trace_id = vec![0u8; 15];
     trace_id.push(0x2a);
     let span = Span {
@@ -124,7 +136,7 @@ fn a_root_span_has_no_parent_and_only_its_own_attributes() {
         "trace_id": "0000000000000007", "span_id": "0000000000000007", "name": "forward",
         "start": 5, "duration_us": 0, "pool": "", "op": "chat",
     });
-    let bytes = proto::export_request([&record]).expect("a span");
+    let bytes = export_request([&record]).expect("a span");
     let request = decoded(&bytes);
     let span = &request.resource_spans[0].scope_spans[0].spans[0];
     assert!(span.parent_span_id.is_empty());
@@ -142,7 +154,7 @@ fn an_attribute_keeps_the_type_the_record_states() {
         "start": 5, "duration_us": 0, "pool": "p", "ingress": true, "op": 0.5, "lane": 3,
         "provider": 0, "model": -2,
     });
-    let bytes = proto::export_request([&record]).expect("a span");
+    let bytes = export_request([&record]).expect("a span");
     let request = decoded(&bytes);
     let span = &request.resource_spans[0].scope_spans[0].spans[0];
     let typed = |key: &str, value: any_value::Value| KeyValue {
@@ -188,7 +200,7 @@ fn a_full_span_record_is_the_span() {
             "status": {"code": "error", "message": "boom"}
         }
     });
-    let bytes = proto::export_request([&record]).expect("a span");
+    let bytes = export_request([&record]).expect("a span");
     let request = decoded(&bytes);
     let span = &request.resource_spans[0].scope_spans[0].spans[0];
     let typed = |key: &str, value: any_value::Value| KeyValue {
@@ -252,7 +264,7 @@ fn a_record_without_a_span_identity_encodes_to_nothing() {
         json!({"trace_id": "0000000000000001", "span_id": "ff"}),
         json!({"trace_id": "+00000000000002a", "span_id": "0000000000000001"}),
     ] {
-        assert_eq!(proto::export_request([&record]), None, "{record}");
+        assert_eq!(export_request([&record]), None, "{record}");
     }
 }
 
@@ -265,16 +277,13 @@ fn a_batch_is_one_request_carrying_each_span_in_order() {
         json!({"name": "no identity"}),
         json!({"trace_id": "0000000000000001", "span_id": "0000000000000003", "name": "b"}),
     ];
-    let request = decoded(&proto::export_request(&records).expect("two spans"));
+    let request = decoded(&export_request(&records).expect("two spans"));
     let spans = &request.resource_spans[0].scope_spans[0].spans;
     let names: Vec<_> = spans.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["a", "b"]);
-    assert!(!proto::is_span(&records[1]));
+    assert!(!is_span(&records[1]));
 
-    assert_eq!(
-        proto::export_request([&records[0]]),
-        proto::export_request(&records[..1])
-    );
+    assert_eq!(export_request([&records[0]]), export_request(&records[..1]));
 }
 
 /// The settings' shape refuses in the configuration grammar's words.
@@ -320,7 +329,7 @@ fn a_delivery_posts_the_request_with_the_credential_moved_to_a_header() {
         endpoint.collector,
         "https://collector.example:4318/v1/traces"
     );
-    let body = proto::export_request([&json!({"trace_id": "0000000000000001",
+    let body = export_request([&json!({"trace_id": "0000000000000001",
         "span_id": "0000000000000002", "name": "n", "start": 1, "duration_us": 1})])
     .expect("a span");
     let (request, sealed) = endpoint.parts(body.clone());
@@ -695,7 +704,7 @@ fn a_run_the_connector_refused_sends_no_later_batch() {
 
 /// The `Span` the sink encodes `record` as, through the request it builds.
 fn span_of(record: &serde_json::Value) -> Option<Span> {
-    let bytes = proto::export_request([record])?;
+    let bytes = export_request([record])?;
     Some(decoded(&bytes).resource_spans[0].scope_spans[0].spans[0].clone())
 }
 
@@ -801,8 +810,8 @@ fn the_span_member_wins_over_projected_fields() {
         "span": {"trace_id": "nothex", "span_id": "0000000000000009", "name": "full"},
     });
     assert!(span_of(&bad).is_none());
-    assert!(!proto::is_span(&bad));
-    assert!(proto::export_request([&bad]).is_none());
+    assert!(!is_span(&bad));
+    assert!(export_request([&bad]).is_none());
     let both = json!({
         "trace_id": "0000000000000007", "span_id": "0000000000000008", "name": "projected",
         "span": {"trace_id": "0000000000000007", "span_id": "0000000000000009", "name": "full"},
@@ -851,14 +860,25 @@ fn log_target_masks_a_credential_in_its_fall_through_branches() {
         let shown = log_target(&text);
         assert!(!shown.contains(KEY), "{text}: {shown}");
 
-        assert!(
-            shown.ends_with(":***") || (text.contains('@') && shown == "***"),
-            "{text}: {shown}"
-        );
+        assert_eq!(shown, "***", "{text}");
     }
 
     let shown = log_target(&format!("https://user:{KEY}/x@host:99999/p/{KEY}"));
     assert!(!shown.contains(KEY), "{shown}");
+}
+
+/// A hostless url that parses (`user:secret`, no `@`) names its first word as a scheme, and that
+/// word may be the credential's front: a line shows it no more than an unparsed url's.
+#[test]
+fn a_hostless_urls_scheme_word_stays_out_of_lines() {
+    for text in ["admin:CANARYhostless", "admin:CANARYhostless/v1/traces"] {
+        assert!(ambiguous_url(text).is_none(), "{text} is accepted");
+        let shown = log_target(text);
+        assert!(!shown.contains("admin"), "{text}: {shown}");
+        assert_eq!(shown, "***", "{text}");
+        let endpoint = Endpoint::of(&OtlpSettings { url: text.into() });
+        assert!(!format!("{endpoint:?}").contains("admin"), "{endpoint:?}");
+    }
 }
 
 #[test]
@@ -892,7 +912,7 @@ fn identity_validation_preserves_uppercase_ids_and_omits_invalid_parents() {
                 source
             };
             let request =
-                decoded(&proto::export_request([&record]).expect("span survives invalid parent"));
+                decoded(&export_request([&record]).expect("span survives invalid parent"));
             let span = &request.resource_spans[0].scope_spans[0].spans[0];
             assert_eq!(span.trace_id, [vec![0; 15], vec![0xab]].concat());
             assert_eq!(span.span_id, [0, 0, 0, 0, 0, 0, 0, 0xcd]);
@@ -900,7 +920,7 @@ fn identity_validation_preserves_uppercase_ids_and_omits_invalid_parents() {
         }
         let zero = json!({"trace_id":"00000000000000ab", "span_id":"0000000000000000"});
         let zero = if full { json!({"span": zero}) } else { zero };
-        assert_eq!(proto::export_request([&zero]), None);
+        assert_eq!(export_request([&zero]), None);
     }
 }
 
@@ -1088,5 +1108,20 @@ fn settings_schema_matches_lifecycle() {
             accepted,
             "resolved lifecycle: {settings}"
         );
+    }
+}
+
+/// The URL standard gives a userinfo no place beside an empty host or under `file:`, so such a url
+/// does not parse: its userinfo is cut as an unparsed url's is, and no `Authorization` is made.
+#[test]
+fn a_userinfo_beside_no_host_or_under_file_is_cut_as_unparsed() {
+    for (text, clean) in [
+        ("custom://op:CANARYpw@/p?q", "custom:///p?q"),
+        ("custom://op:CANARYpw@:9/p", "custom://:9/p"),
+        ("file://u:CANARYpw@host/x", "file://host/x"),
+    ] {
+        assert!(url::Url::parse(text).is_err(), "{text}");
+        assert_eq!(split_credentials(text), (clean.to_string(), None), "{text}");
+        assert!(!carries_userinfo(text), "{text}");
     }
 }

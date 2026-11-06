@@ -17,13 +17,13 @@
 //! `exchange()` over it: `POST`, `content-type: application/x-protobuf`. The sink never dials.
 //! Credentials the operator embedded in the URL (`https://user:pass@collector/…`) never ride the
 //! request: they move into an `Authorization: Basic` header, and every line this sink writes masks
-//! them; a url whose credential would be misread as its host is refused ([`ambiguous_url`]). A
-//! delivery is fire-and-forget and never retried; a refused, failed or non-2xx export drops that
-//! batch, logged at warn.
+//! them; a url whose credential would be misread as its host is refused. A delivery is
+//! fire-and-forget and never retried; a failed or non-2xx export, or a refusal after the first
+//! answer, drops that batch, logged at warn.
 //!
 //! **Admission.** The host's connector judges every export against the need's egress class. Its
 //! first answer settles the run: refused, the sink logs `…; disabling OTLP trace export` and sends
-//! no later batch; carried, it logs `OTLP tracing enabled`.
+//! no later batch (that line at error, `BUSBAR-7140`); carried, it logs `OTLP tracing enabled`.
 //!
 //! **Settings** ([`OtlpSettings`]): `url`, required.
 //!
@@ -95,7 +95,8 @@ const OTLP_TRACES_PATH: &str = "/v1/traces";
 /// `url` as a log line or `Debug` names it: scheme, a masked userinfo, host
 /// and port. A path becomes `/***` unless it is `/` or OTLP's own `/v1/traces`, since a collector key
 /// may ride in the path. A query becomes `?***` (`?api-key=`). A fragment is dropped. A string that
-/// is not a URL keeps only its scheme (see [`unparsed_target`]).
+/// is not a URL, or names no host (`admin:secret`, whose first word may be the credential), keeps
+/// only an `http`/`https` scheme (see [`unparsed_target`]).
 pub(crate) fn log_target(url: &str) -> String {
     let Ok(u) = parsed_url(url) else {
         return unparsed_target(url);
@@ -105,7 +106,7 @@ pub(crate) fn log_target(url: &str) -> String {
         return unparsed_target(url);
     }
     let Some(host) = u.host_str() else {
-        return format!("{}:***", u.scheme());
+        return unparsed_target(url);
     };
     let mut out = format!("{}://", u.scheme());
     if !u.username().is_empty() || u.password().is_some() {
@@ -128,7 +129,8 @@ pub(crate) fn log_target(url: &str) -> String {
 
 /// The parts of `url` that can carry a credential, as [`scrub`] cuts them from foreign text: the URL
 /// as written and masked (`busbar_contract::abi::sdk::mask::mask_url`), the URL without userinfo,
-/// its path (unless OTLP's own), query and userinfo, each also percent-decoded; longest first.
+/// its path (unless OTLP's own), query, fragment, password and username, each also
+/// percent-decoded; longest first.
 pub(crate) fn secret_parts(url: &str) -> Vec<String> {
     let (clean, mut unused_authorization) = split_credentials(url);
     unused_authorization.zeroize();
@@ -219,20 +221,13 @@ pub(crate) fn split_credentials(endpoint: &str) -> (String, Option<String>) {
     if let Some(authorization) = &authorization {
         seams::watch("Basic value", authorization.as_bytes());
     }
-    let clean = if parsed.host_str().is_none_or(str::is_empty) || parsed.scheme() == "file" {
-        let host = parsed.host_str().unwrap_or("");
-        match parsed.port() {
-            Some(p) => format!("{}://{host}:{p}", parsed.scheme()),
-            None => format!("{}://{host}", parsed.scheme()),
-        }
-    } else {
-        let prefix = &parsed[..url::Position::BeforeUsername];
-        let suffix = &parsed[url::Position::BeforeHost..];
-        let mut clean = String::with_capacity(prefix.len() + suffix.len());
-        clean.push_str(prefix);
-        clean.push_str(suffix);
-        clean
-    };
+    // A parsed URL holds a userinfo only beside a non-empty host and never under `file:` (the URL
+    // standard refuses both), so the userinfo is exactly what lies between its scheme and host.
+    let prefix = &parsed[..url::Position::BeforeUsername];
+    let suffix = &parsed[url::Position::BeforeHost..];
+    let mut clean = String::with_capacity(prefix.len() + suffix.len());
+    clean.push_str(prefix);
+    clean.push_str(suffix);
     (clean, authorization)
 }
 
