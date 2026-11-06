@@ -28,31 +28,3 @@ impl Drop for ParsedUrl {
         }
     }
 }
-
-/// Borrow-deserialize from the parse tree so every owned source string is still present to wipe
-/// on either success or refusal. This does not control the JSON parser's internal scratch.
-pub(crate) struct SettingsValue(pub(crate) serde_json::Value);
-impl Deref for SettingsValue {
-    type Target = serde_json::Value;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl Drop for SettingsValue {
-    fn drop(&mut self) {
-        fn wipe(value: &mut serde_json::Value) {
-            match value {
-                serde_json::Value::String(text) => text.zeroize(),
-                serde_json::Value::Array(items) => items.iter_mut().for_each(wipe),
-                serde_json::Value::Object(items) => {
-                    for (mut key, mut value) in std::mem::take(items) {
-                        key.zeroize();
-                        wipe(&mut value);
-                    }
-                }
-                _ => {}
-            }
-        }
-        wipe(&mut self.0);
-    }
-}

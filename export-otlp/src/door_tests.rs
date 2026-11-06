@@ -1165,3 +1165,12 @@ fn capped_cuts_at_the_exact_cap_on_a_char_boundary() {
     assert!(over.ends_with('…'), "{over:?}");
     assert_eq!(over.chars().count(), 257);
 }
+
+#[test]
+fn guarded_settings_keep_duplicate_and_escaped_url_semantics() {
+    let settings = super::parsed(
+        br#"{"url":"https://discarded.example/","url":"https://collector.example/v1/\u0074races"}"#,
+    )
+    .unwrap();
+    assert_eq!(settings.url, "https://collector.example/v1/traces");
+}

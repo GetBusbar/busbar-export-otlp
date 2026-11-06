@@ -414,8 +414,9 @@ pub const NO_INSTANCE: &str = "no opened otlp instance";
 
 /// The settings as [`OtlpSettings`], or the one refusal `validate`, `open` and `refresh` all give.
 fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
-    let value =
-        crate::owners::SettingsValue(busbar_contract::abi::sdk::life::settings_value(settings)?);
+    let value = busbar_contract::abi::sdk::cred::SettingsValue::from(
+        busbar_contract::abi::sdk::life::settings_value(settings)?,
+    );
     crate::seams::watch_settings_value(&value);
     let settings: OtlpSettings = serde::Deserialize::deserialize(&*value)
         .map_err(|e: serde_json::Error| Refusal::failed(format!("settings: {e}")))?;
