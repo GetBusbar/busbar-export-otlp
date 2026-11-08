@@ -204,30 +204,36 @@ fi
 
 # ---- SUBJECT build ------------------------------------------------------------------------------
 say "subject: building the driver with the plugin workspace's lock and pinned contract"
-# The example is an existing workspace package target, not a new generated package. Its logic,
-# serde_json and contract dependencies already occur in the root lock, which stays unmodified.
+# The private driver compiles inside the implementation test target; production exports remain narrow.
 BUILT=0
-if cargo build --locked --release --manifest-path "$ROOT/Cargo.toml" -p busbar-export-otlp \
-  --example otlp-conformance-driver >"$OUT/work/build.log" 2>&1; then
+if cargo test --locked --release --manifest-path "$ROOT/Cargo.toml" -p busbar-export-otlp \
+  --lib --no-run --message-format=json >"$OUT/work/build.jsonl" 2>"$OUT/work/build.log"; then
   BUILT=1
 else
   tail -30 "$OUT/work/build.log" >&2
   note "subject: the driver does not build with the plugin's pinned dependencies"
 fi
-DRIVER="${CARGO_TARGET_DIR:-$ROOT/target}/release/examples/otlp-conformance-driver"
+DRIVER="$(python3 - "$OUT/work/build.jsonl" <<'PYDRIVER'
+import json, sys
+for line in open(sys.argv[1]):
+    item = json.loads(line)
+    if item.get("reason") == "compiler-artifact" and item.get("executable") and item["target"]["name"] == "busbar_export_otlp":
+        print(item["executable"])
+PYDRIVER
+)"
 
 # ---- SUBJECT + NEGATIVE CONTROL ------------------------------------------------------------------
 if [ "$BUILT" = 1 ]; then
   if collector_start subject; then
     URL="http://127.0.0.1:$PORT/v1/traces"
     say "subject: delivering the fixture batch to $URL"
-    if ! run_tool "$DRIVER" send "$URL" "$HERE/fixture.jsonl" >"$OUT/work/send.log" 2>&1; then
+    if ! run_tool env BUSBAR_OTLP_DRIVER_MODE=send BUSBAR_OTLP_DRIVER_ARG1="$URL" BUSBAR_OTLP_DRIVER_ARG2="$HERE/fixture.jsonl" "$DRIVER" --ignored --exact conformance_driver::driver --nocapture >"$OUT/work/send.log" 2>&1; then
       note "subject: the collector refused the plugin's export ($(head -1 "$OUT/work/send.log"))"
     fi
     # The body runs under the same deadline as every other tool; the negative controls built from
     # it run only when it was built, so a missing body is one reason, not three false ones.
     BODY=0
-    if run_tool "$DRIVER" body "$HERE/fixture.jsonl" "$OUT/work/body.bin" && [ -s "$OUT/work/body.bin" ]; then
+    if run_tool env BUSBAR_OTLP_DRIVER_MODE=body BUSBAR_OTLP_DRIVER_ARG1="$HERE/fixture.jsonl" BUSBAR_OTLP_DRIVER_ARG2="$OUT/work/body.bin" "$DRIVER" --ignored --exact conformance_driver::driver --nocapture && [ -s "$OUT/work/body.bin" ]; then
       BODY=1
     else
       note "subject: no body built"

@@ -36,7 +36,8 @@ use busbar_contract::abi::sdk::exchange::{
     exchange, Exchange, ExchangeResponse, Request, SealedField, REPLY_OVER_BOUND,
 };
 use busbar_contract::abi::sdk::export::tail;
-pub use busbar_contract::abi::sdk::export::{NO_EXPOSITION, NO_ROUTE};
+#[cfg(test)]
+use busbar_contract::abi::sdk::export::NO_ROUTE;
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 
@@ -285,6 +286,7 @@ impl Otlp {
 
     /// The endpoint this instance sends to.
     #[must_use]
+    #[cfg(test)]
     pub fn endpoint(&self) -> Endpoint {
         self.run().endpoint.clone()
     }
@@ -427,6 +429,7 @@ fn parsed(settings: &[u8]) -> Result<OtlpSettings, Refusal> {
 }
 
 impl Life for Otlp {
+    type Kind = busbar_contract::plugin::markers::ExportKind;
     const CANCEL: u32 = cancel::ABORTED;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
@@ -486,11 +489,12 @@ pub fn batch_body(batch: &[u8]) -> Option<Vec<u8>> {
 pub struct Deliver;
 
 impl SafeSlot for Deliver {
+    type Kind = busbar_contract::plugin::markers::ExportKind;
     type In = DeliverIn;
     type Out = OutHead;
     type State = Held<Otlp>;
     fn call(
-        instance: Instance<'_, Held<Otlp>>,
+        instance: Instance<'_, Held<Otlp>, busbar_contract::plugin::markers::ExportKind>,
         input: Lent<'_, DeliverIn>,
         mut out: Out<'_, OutHead>,
     ) -> Outcome {
@@ -612,11 +616,12 @@ fn failure_text(error: &ConnFailure, secrets: &[String]) -> String {
 pub struct Check;
 
 impl SafeSlot for Check {
+    type Kind = busbar_contract::plugin::markers::ExportKind;
     type In = CheckIn;
     type Out = CheckOut;
     type State = Held<Otlp>;
     fn call(
-        instance: Instance<'_, Held<Otlp>>,
+        instance: Instance<'_, Held<Otlp>, busbar_contract::plugin::markers::ExportKind>,
         _: Lent<'_, CheckIn>,
         mut out: Out<'_, CheckOut>,
     ) -> Outcome {

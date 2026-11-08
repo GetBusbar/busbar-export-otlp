@@ -35,7 +35,7 @@ busbar-export-otlp-plugin = { path = ".", features = ["dropped-in"] }
 # The conformance test loads the built cdylib and the linked door over the REAL loader and drives
 # both through the one dispatcher — dev-only, never in the shipped artifact. Same pinned rev as the
 # logic crate's busbar-contract, so one busbar source resolves.
-busbar-plugin-loader = { workspace = true }
+busbar-plugin-loader = { workspace = true , features = ["test-support"] }
 busbar-core-connector = { workspace = true }
 busbar-kernel = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time"] }
@@ -49,3 +49,4 @@ prost = { workspace = true, features = ["default"] }
 # The real connector uses the pinned TCP+HTTP doors in integration tests.
 busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }
+busbar-contract = { workspace = true, features = ["test-seal"] }

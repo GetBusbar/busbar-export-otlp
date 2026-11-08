@@ -94,7 +94,7 @@ fn cdylib() -> PathBuf {
 
 /// The row a busbar build that links the sink states.
 fn row() -> LinkedRow {
-    LinkedRow::of(busbar_export_otlp::door::door).expect("the linked door renders")
+    LinkedRow::of(busbar_export_otlp::door).expect("the linked door renders")
 }
 
 /// One declared need: its egress class and the target it was declared at, if any.
@@ -505,11 +505,14 @@ impl Host {
 
     fn with_profile(profile: CarrierProfile) -> Self {
         Self {
-            d: Arc::new(Dispatcher::new(DispatchConfig {
-                workers: 2,
-                watchdog_period: Duration::from_millis(20),
-                ..DispatchConfig::default()
-            })),
+            d: Arc::new(Dispatcher::new(
+                DispatchConfig {
+                    workers: 2,
+                    watchdog_period: Duration::from_millis(20),
+                    ..DispatchConfig::default()
+                },
+                busbar_contract::services::test_caller_binding(),
+            )),
             collector: Arc::new(Collector {
                 profile,
                 ..Collector::default()
@@ -955,10 +958,10 @@ fn the_linked_and_the_dropped_in_otlp_sink_are_one_plugin() {
     assert_eq!(
         linked["answers"],
         json!({
-            "scrape": format!("Refused {}", busbar_export_otlp::door::NO_EXPOSITION),
+            "scrape": format!("Refused {}", busbar_contract::abi::sdk::export::NO_EXPOSITION),
             "status": "Ready ",
             "check": "Ready ",
-            "serve": format!("Refused {}", busbar_export_otlp::door::NO_ROUTE),
+            "serve": format!("Refused {}", busbar_contract::abi::sdk::export::NO_ROUTE),
         })
     );
     assert_eq!(
@@ -1282,7 +1285,8 @@ fn multiple_collectors_deliver_independently_through_both_doors() {
 #[test]
 fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
     use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, KEEP_NAMED};
-    let st = busbar_export_otlp::door::STATEMENT;
+    // SAFETY: the actual linked door owns its static declaration.
+    let st = unsafe { &*busbar_export_otlp::door().statement() };
     assert_eq!(st.needs_len, 1);
     // SAFETY: the Statement's needs are a `'static` list of `needs_len` entries.
     let need = unsafe { std::slice::from_raw_parts(st.needs, st.needs_len) }[0];
@@ -1292,7 +1296,7 @@ fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
     assert_eq!(transport, b"http");
     assert_eq!(need.direction, DIRECTION_OUTBOUND);
     assert_eq!(need.egress_class, EGRESS_LOOPBACK_ALLOWED);
-    assert_eq!(need.timeout_ms, busbar_export_otlp::EXPORT_TIMEOUT_MS);
+    assert_eq!(need.timeout_ms, 10_000);
     assert_eq!(need.keep_mode, KEEP_NAMED);
 }
 
@@ -1301,7 +1305,8 @@ fn the_statement_need_names_the_url_setting_and_the_loopback_http_collector() {
 #[test]
 fn the_statement_states_the_otlp_alias_rewrite() {
     use busbar_contract::abi::mechanism::door::REWRITE_ALIAS;
-    let st = busbar_export_otlp::door::STATEMENT;
+    // SAFETY: the actual linked door owns its static declaration.
+    let st = unsafe { &*busbar_export_otlp::door().statement() };
     assert_eq!(st.rewrites_len, 1);
     // SAFETY: the Statement's rewrites are a `'static` list of `rewrites_len` entries.
     let rewrite = unsafe { std::slice::from_raw_parts(st.rewrites, st.rewrites_len) }[0];
@@ -1364,7 +1369,7 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
     let port = conformance_host::far_end(collected);
     inputs["settings"]["url"] = format!("https://localhost:{port}/v1/traces").into();
     let settings = inputs["settings"].to_string().into_bytes();
-    let row = LinkedRow::of(busbar_export_otlp::door::door).expect("actual linked statement");
+    let row = LinkedRow::of(busbar_export_otlp::door).expect("actual linked statement");
     let mut answers = Vec::new();
     for dropped in [false, true] {
         RECEIVED.lock().unwrap().clear();
@@ -1390,13 +1395,12 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
             p.secret_refs(),
             p.reference_fields()
         )];
-        use std::sync::atomic::Ordering;
-        let mut prior_crossings = p.inner.crossings.load(Ordering::SeqCst);
-        let mut prior_resumes = p.inner.resumes.load(Ordering::SeqCst);
+        let mut prior_crossings = p.test_invocations().0;
+        let mut prior_resumes = p.test_invocations().1;
         let mut counts = Vec::new();
         let mut pin = |label: &str, first: u64| {
-            let crossings = p.inner.crossings.load(Ordering::SeqCst);
-            let resumes = p.inner.resumes.load(Ordering::SeqCst);
+            let crossings = p.test_invocations().0;
+            let resumes = p.test_invocations().1;
             let resumed = resumes - prior_resumes;
             assert_eq!(
                 crossings - prior_crossings - resumed,
@@ -1653,9 +1657,12 @@ mod declared_secrets {
     use serde_json::{json, Value};
 
     fn load() -> Plugin<Export> {
-        let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+        let d = Arc::new(Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        ));
         load_linked::<Export>(
-            &LinkedRow::of(busbar_export_otlp::door::door).expect("the linked door renders"),
+            &LinkedRow::of(busbar_export_otlp::door).expect("the linked door renders"),
             Bind {
                 instance: Arc::from("declared"),
                 max_inflight_cap: 64,
@@ -1693,7 +1700,7 @@ mod declared_secrets {
 
 #[test]
 fn the_declared_needs_are_the_statements() {
-    let row = busbar_plugin_loader::dispatch::LinkedRow::of(busbar_export_otlp::door::door)
+    let row = busbar_plugin_loader::dispatch::LinkedRow::of(busbar_export_otlp::door)
         .expect("actual statement");
     let statement = busbar_contract::abi::mechanism::rendering::read(&row.statement)
         .expect("statement renders");

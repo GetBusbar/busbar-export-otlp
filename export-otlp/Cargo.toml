@@ -14,10 +14,6 @@ publish.workspace = true
 # repo), which exports the same door as `busbar_plugin_door`.
 crate-type = ["rlib"]
 
-[[example]]
-name = "otlp-conformance-driver"
-path = "../testing/otlp-conformance/driver/main.rs"
-
 [dependencies]
 # The ONE busbar crate a plugin names (#40: contract only; DECISIONS #84 merged the plugin SDK into it
 # as `busbar_contract::abi::sdk`, so a plugin's busbar closure is exactly busbar-contract). Pinned by
@@ -48,3 +44,4 @@ opentelemetry-proto = { workspace = true }
 prost = { workspace = true, features = ["default"] }
 # Standard base64, the suite's independent check of the Basic credential the SDK encodes. Test-only.
 base64 = { workspace = true }
+busbar-contract = { workspace = true, features = ["test-seal"] }

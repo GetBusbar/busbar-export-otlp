@@ -30,6 +30,7 @@ fn transport_dispatcher() -> Arc<Dispatcher> {
             let dispatcher = Dispatcher::with_services(
                 DispatchConfig::default(),
                 Arc::new(busbar_kernel::host_services::KernelServices::new()),
+                busbar_contract::services::test_caller_binding(),
             );
             let _ = dispatcher.lend_seal(busbar_kernel::seal::lend());
             dispatcher.install_runtime(runtime());
@@ -68,7 +69,7 @@ fn host_judged(
         busbar_core_connector::tls::client::build_client_config(&trust).expect("connector TLS");
     let doors = [
         ("tcp", busbar_transport_tcp::linked::MACRO_DOOR),
-        ("http", busbar_transport_http::door::MACRO_DOOR),
+        ("http", busbar_transport_http::MACRO_DOOR),
     ];
     let entries = doors
         .into_iter()

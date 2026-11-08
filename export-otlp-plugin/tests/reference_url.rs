@@ -28,7 +28,10 @@ fn settings_as_the_kernel_resolves(
 const URL: &str = "https://collector.example:4318/v1/traces";
 
 fn linked() -> (Plugin<Export>, Arc<Dispatcher>) {
-    let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+    let d = Arc::new(Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    ));
     let bind = Bind {
         instance: Arc::from("reference-url"),
         max_inflight_cap: 64,
@@ -36,7 +39,7 @@ fn linked() -> (Plugin<Export>, Arc<Dispatcher>) {
         dispatcher: d.adopter(),
         conns: ConnTable::Probe,
     };
-    let row = LinkedRow::of(busbar_export_otlp::door::door).expect("the row renders");
+    let row = LinkedRow::of(busbar_export_otlp::door).expect("the row renders");
     (
         load_linked::<Export>(&row, bind).expect("the door loads"),
         d,

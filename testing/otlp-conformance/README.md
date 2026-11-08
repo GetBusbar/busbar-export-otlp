@@ -5,7 +5,7 @@ Run through `testing/conformance/run.sh`, or invoke this suite's `run.sh` with
 Rust toolchain must be available. The command helper uses Python's POSIX process
 groups and wait-without-reaping support on the suite's Linux/macOS hosts.
 
-The subject driver is the `otlp-conformance-driver` example of `busbar-export-otlp`.
+The subject driver is the private `conformance_driver::driver` test inside `busbar-export-otlp`; the suite builds and invokes it explicitly.
 The suite builds it with `cargo build --locked --release` from the existing plugin
 workspace. It uses that workspace's unchanged `Cargo.lock` and Git-pinned contract;
 it creates no standalone package, copied lock or local contract patch. The normal

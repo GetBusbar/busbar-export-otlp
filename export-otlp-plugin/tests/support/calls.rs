@@ -20,7 +20,10 @@ pub fn json(bytes: &[u8]) -> Blob {
     }
 }
 pub fn dispatcher() -> Arc<Dispatcher> {
-    Arc::new(Dispatcher::new(DispatchConfig::default()))
+    Arc::new(Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    ))
 }
 pub fn bind(d: &Dispatcher, name: &str) -> Bind {
     Bind {

@@ -13,15 +13,22 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-use busbar_export_otlp::door::{self, Endpoint};
-use busbar_export_otlp::OtlpSettings;
+use crate::door::{self, Endpoint};
+use crate::OtlpSettings;
 
 fn body(batch: &[u8]) -> Vec<u8> {
     door::batch_body(batch).expect("the batch holds no span")
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
+#[test]
+#[ignore = "invoked explicitly by the native collector conformance suite"]
+fn driver() {
+    let args = [
+        "driver".to_string(),
+        std::env::var("BUSBAR_OTLP_DRIVER_MODE").expect("driver mode"),
+        std::env::var("BUSBAR_OTLP_DRIVER_ARG1").expect("first driver argument"),
+        std::env::var("BUSBAR_OTLP_DRIVER_ARG2").expect("second driver argument"),
+    ];
     match args.get(1).map(String::as_str) {
         Some("body") if args.len() == 4 => {
             let b = body(&std::fs::read(&args[2]).expect("read batch"));
@@ -71,11 +78,14 @@ fn main() {
                 .nth(1)
                 .and_then(|c| c.parse().ok())
                 .unwrap_or(0);
-            std::process::exit(if (200..300).contains(&code) { 0 } else { 1 });
+            assert!(
+                (200..300).contains(&code),
+                "collector refused export: {status}"
+            );
         }
         _ => {
             eprintln!("usage: driver body <batch> <out> | driver send <url> <batch>");
-            std::process::exit(2);
+            panic!("invalid conformance driver arguments");
         }
     }
 }

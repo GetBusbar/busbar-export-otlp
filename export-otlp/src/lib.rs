@@ -68,14 +68,14 @@ fn parsed_url(text: &str) -> Result<owners::ParsedUrl, url::ParseError> {
     Ok(parsed)
 }
 
-pub mod config;
-pub mod door;
+pub(crate) mod config;
+pub(crate) mod door;
 mod owners;
-pub mod proto;
+pub(crate) mod proto;
 
 use busbar_contract::abi::sdk::mask::mask_url;
 use busbar_contract::abi::sdk::url::{self as sdk_url, cut_userinfo, Userinfo};
-pub use config::OtlpSettings;
+pub(crate) use config::OtlpSettings;
 use zeroize::{Zeroize, Zeroizing};
 
 /// The plugin's canonical name.
@@ -86,9 +86,9 @@ pub const ALIAS: &str = "otlp";
 pub const DECLARES: &str = include_str!("../declares.json");
 
 /// OTLP/HTTP's binary protobuf encoding.
-pub const CONTENT_TYPE: &str = "application/x-protobuf";
+pub(crate) const CONTENT_TYPE: &str = "application/x-protobuf";
 /// Each export's end-to-end deadline.
-pub const EXPORT_TIMEOUT_MS: u64 = 10_000;
+pub(crate) const EXPORT_TIMEOUT_MS: u64 = 10_000;
 /// The OTLP/HTTP traces path (the specification's default), kept in a log line: it is not a secret.
 const OTLP_TRACES_PATH: &str = "/v1/traces";
 
@@ -256,3 +256,10 @@ pub(crate) fn request_target(endpoint: &str) -> String {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+/// The validated entry and generated registration descriptor.
+pub use door::{door, MACRO_DOOR};
+
+#[cfg(test)]
+#[path = "../../testing/otlp-conformance/driver/main.rs"]
+mod conformance_driver;
