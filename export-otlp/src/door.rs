@@ -107,7 +107,9 @@ pub const STATEMENT: Statement = Statement {
 /// The catalogue codes the sink's lines carry (`declares.json`): the exporter disabled because the
 /// host refused its target, a non-2xx answer (batch dropped), a transport failure (batch dropped),
 /// a collector's partial rejection, a record skipped (not JSON, or no span identity), a collector's
-/// warning on an accepted batch (`partial_success` with a message and no rejected span).
+/// warning or unreadable reply on an accepted batch (`partial_success` with a message and no
+/// rejected span, a negative rejected count, a reply that exceeded the body limit, or a reply that
+/// is not a valid protobuf response).
 const DISABLED: &str = "BUSBAR-7140";
 const NON_2XX: &str = "BUSBAR-7141";
 const TRANSPORT_FAILURE: &str = "BUSBAR-7142";
@@ -195,19 +197,25 @@ impl Endpoint {
                  holds a `:`); exports go without it"
             );
         }
+        let secure = clean
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"));
+        let authorization = authorization.map(|value| {
+            Cred::take(&mut serde_json::Value::String(value))
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        endpoint = %shown,
+                        "OTLP url credential could not be held; exports go without it"
+                    );
+                    Cred::empty()
+                })
+                .require_secure_if(secure)
+        });
         Self {
             shown,
             target: Target {
                 path: request_target(&clean),
-                authorization: authorization.map(|value| {
-                    Cred::take(&mut serde_json::Value::String(value))
-                        .unwrap_or_else(Cred::empty)
-                        .require_secure_if(
-                            clean
-                                .split_once("://")
-                                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
-                        )
-                }),
+                authorization,
             },
             collector: clean,
             secrets,
@@ -363,11 +371,12 @@ impl Run {
             Ok(reply) if (200..300).contains(&reply.status) => {
                 let partial = match proto::collector_response(&reply.body) {
                     Ok(partial) => partial,
-                    Err(_) => {
+                    Err(decode) => {
                         tracing::warn!(
                             diag = %PARTIAL_WARNING,
                             endpoint = %shown,
                             status = reply.status,
+                            error = %decode,
                             "OTLP collector reply is not a valid protobuf response; partial-success details are unavailable"
                         );
                         return;

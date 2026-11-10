@@ -448,9 +448,12 @@ fn a_malformed_collector_response_warns_without_echoing_its_body() {
         assert_eq!(lines[0].0, tracing::Level::WARN);
         assert_eq!(lines[0].1,
             "OTLP collector reply is not a valid protobuf response; partial-success details are unavailable");
-        assert_eq!(
-            lines[0].2,
-            " diag=BUSBAR-7145 endpoint=https://c.example/v1/traces status=200"
+        assert!(
+            lines[0].2.starts_with(
+                " diag=BUSBAR-7145 endpoint=https://c.example/v1/traces status=200 error="
+            ),
+            "expected decode error in the fields: {:?}",
+            lines[0].2
         );
         assert!(!format!("{lines:?}").contains("SECRETpw"));
     }
