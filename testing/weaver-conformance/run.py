@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Official Weaver checks on this invocation's real Collector-captured plugin spans.
 
-No custom advice policy, finding filter, registry extension, or severity override.
+No custom advice policy, finding filter, or severity override. A declared Busbar
+registry extends the upstream schema; the base-only result is retained separately.
 This evaluates traces/resources only: the plugin does not export metrics or logs.
 """
 import copy
@@ -11,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import tarfile
 import urllib.request
@@ -70,6 +72,21 @@ def provision(work):
     fetch(f"https://codeload.github.com/open-telemetry/semantic-conventions/tar.gz/{REGISTRY_COMMIT}", REGISTRY_SHA, registry)
     unpack(registry, work / "registry")
     return work / "tool" / f"weaver-{triple}" / "weaver", work / "registry" / f"semantic-conventions-{REGISTRY_COMMIT}" / "model"
+
+
+def custom_registry(work, official):
+    """Use Weaver's supported registry dependency mechanism, never policy filters."""
+    directory = work / "busbar-registry"
+    directory.mkdir()
+    extension = Path(__file__).with_name("registry") / "busbar.yaml"
+    shutil.copyfile(extension, directory / "busbar.yaml")
+    # JSON is YAML; using its serializer safely quotes the local dependency path.
+    write(directory / "manifest.yaml", {
+        "schema_url": "https://getbusbar.dev/schemas/otel/1.6.0",
+        "description": "Busbar custom dynamic metadata plus official OTel semantic conventions",
+        "dependencies": [{"schema_url": "https://opentelemetry.io/schemas/1.45.0",
+                          "registry_path": str(official)}]})
+    return directory, digest(extension)
 
 
 def any_value(value):
@@ -142,10 +159,12 @@ def samples(capture):
 def evaluate(tool, registry, name, sample, evidence):
     input_file = evidence / f"{name}-samples.json"
     write(input_file, sample)
+    config = evidence / "weaver.toml"
+    config.write_text("")  # Never inherit a caller's finding filters/config discovery.
     directory = evidence / name
-    command = [str(tool), "registry", "live-check", "--registry", str(registry),
+    command = [str(tool), "registry", "live-check", "--config", str(config), "--registry", str(registry),
                "--input-source", str(input_file), "--input-format", "json", "--format", "json",
-               "--output", str(directory), "--no-stream", "--fail-on", "violation"]
+               "--output", str(directory), "--no-stream", "--include-unreferenced", "--fail-on", "violation"]
     with (evidence / f"{name}.log").open("w") as log:
         rc = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=log,
                             stderr=subprocess.STDOUT, timeout=180).returncode
@@ -167,16 +186,18 @@ def main():
     work = out / "work"
     work.mkdir()
     assessment = {"weaver_version": VERSION, "semconv_commit": REGISTRY_COMMIT,
-                  "scope": "Actual exporter span/resource/event/link attributes; no metrics/logs, certification, or full instrumentation coverage claim",
+                  "scope": "Actual exporter span/resource/event/link attributes against official OTel plus declared Busbar custom metadata; no metrics/logs, certification, or full instrumentation coverage claim",
                   "criteria": "Unmodified official Weaver policies; fail-on violation; all advice retained"}
     status, reason = "fail", "evaluation did not complete"
     try:
         tool, registry = provision(work)
+        combined, extension_sha = custom_registry(work, registry)
+        assessment["custom_registry_sha256"] = extension_sha
         control = [{"attribute": {"name": "service.name", "value": "busbar-control", "type": "string"}}]
         negative = copy.deepcopy(control)
         negative[0]["attribute"].update(value=42, type="int")
-        assessment["control"] = evaluate(tool, registry, "control", control, evidence)
-        assessment["negative"] = evaluate(tool, registry, "negative", negative, evidence)
+        assessment["control"] = evaluate(tool, combined, "control", control, evidence)
+        assessment["negative"] = evaluate(tool, combined, "negative", negative, evidence)
         if assessment["control"]["exit_code"] != 0 or assessment["control"]["violations"]:
             raise ValueError("official service.name control failed")
         neg = assessment["negative"]
@@ -189,16 +210,20 @@ def main():
         capture = prior / "work/subject/traces.json"
         sample, count = samples(capture)
         assessment.update(capture_sha256=digest(capture), source_verdict_sha256=digest(prior / "verdict.json"), spans=count)
-        assessment["subject"] = evaluate(tool, registry, "subject", sample, evidence)
+        # Keep the base-only result visible: a custom-registry pass is never
+        # presented as if custom Busbar fields belonged to official semconv.
+        assessment["official_base_only"] = evaluate(tool, registry, "official-base-only", sample, evidence)
+        assessment["subject"] = evaluate(tool, combined, "subject", sample, evidence)
         sub = assessment["subject"]
         status = "pass" if sub["exit_code"] == 0 and sub["violations"] == 0 else "fail"
-        reason = f"{count} actual exported spans assessed; {sub['violations']} official violations; advice {sub['advice_type_counts']}; traces only"
+        reason = (f"{count} actual exported spans; combined OTel + Busbar custom registry: {sub['violations']} violations; "
+                  f"base-only OTel registry: {assessment['official_base_only']['violations']} violations (retained separately); traces only")
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError) as error:
         reason = f"Weaver evaluation unavailable or incomplete: {type(error).__name__}: {error}"
     assessment.update(status=status, reason=reason)
     write(evidence / "assessment.json", assessment)
     write(out / "verdict.json", {"suite": "otel-semconv-weaver", "status": status, "armed": True,
-          "standard": "OpenTelemetry semantic conventions (exported traces)",
+          "standard": "OpenTelemetry semantic conventions plus Busbar custom metadata (exported traces)",
           "plan": assessment["criteria"] + "; positive and invalid-type controls; actual captured exporter spans",
           "spec_version": f"Weaver {VERSION}; semantic-conventions v1.45.0 ({REGISTRY_COMMIT})", "reason": reason})
     print(reason)

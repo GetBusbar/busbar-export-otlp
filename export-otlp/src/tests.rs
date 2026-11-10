@@ -116,12 +116,12 @@ fn a_traces_record_is_one_otlp_span_every_field_in_its_place() {
         start_time_unix_nano: 1_700_000_000_123_456_000,
         end_time_unix_nano: 1_700_000_000_123_706_000,
         attributes: vec![
-            kv("pool", "p1"),
-            kv("ingress", "openai"),
-            kv("op", "chat"),
-            kv("lane", "l0"),
-            kv("provider", "mock"),
-            kv("model", "m1"),
+            kv("busbar.pool", "p1"),
+            kv("busbar.ingress", "openai"),
+            kv("busbar.op", "chat"),
+            kv("busbar.lane", "l0"),
+            kv("busbar.provider", "mock"),
+            kv("busbar.model", "m1"),
         ],
         ..Default::default()
     };
@@ -140,10 +140,35 @@ fn a_root_span_has_no_parent_and_only_its_own_attributes() {
     let request = decoded(&bytes);
     let span = &request.resource_spans[0].scope_spans[0].spans[0];
     assert!(span.parent_span_id.is_empty());
-    assert_eq!(span.attributes, vec![kv("pool", ""), kv("op", "chat")]);
+    assert_eq!(
+        span.attributes,
+        vec![kv("busbar.pool", ""), kv("busbar.op", "chat")]
+    );
     assert_eq!(
         (span.start_time_unix_nano, span.end_time_unix_nano),
         (5000, 5000)
+    );
+}
+
+#[test]
+fn custom_attribute_namespaces_preserve_standard_keys_and_colliding_values() {
+    let span = span_of(&full(json!({"attributes": [
+        {"key": "pool", "value": "bare"},
+        {"key": "busbar.pool", "value": "qualified"},
+        {"key": "busbar.original.706f6f6c", "value": "reserved"},
+        {"key": "http.request.method", "value": "GET"},
+        {"key": "target", "value": "kernel"},
+    ]})))
+    .unwrap();
+    assert_eq!(
+        span.attributes,
+        vec![
+            kv("busbar.original.706f6f6c.original", "bare"),
+            kv("busbar.pool", "qualified"),
+            kv("busbar.original.706f6f6c", "reserved"),
+            kv("http.request.method", "GET"),
+            kv("busbar.target", "kernel"),
+        ]
     );
 }
 
@@ -165,12 +190,12 @@ fn an_attribute_keeps_the_type_the_record_states() {
     assert_eq!(
         span.attributes,
         vec![
-            kv("pool", "p"),
-            typed("ingress", any_value::Value::BoolValue(true)),
-            typed("op", any_value::Value::DoubleValue(0.5)),
-            typed("lane", any_value::Value::IntValue(3)),
-            typed("provider", any_value::Value::IntValue(0)),
-            typed("model", any_value::Value::IntValue(-2)),
+            kv("busbar.pool", "p"),
+            typed("busbar.ingress", any_value::Value::BoolValue(true)),
+            typed("busbar.op", any_value::Value::DoubleValue(0.5)),
+            typed("busbar.lane", any_value::Value::IntValue(3)),
+            typed("busbar.provider", any_value::Value::IntValue(0)),
+            typed("busbar.model", any_value::Value::IntValue(-2)),
         ]
     );
 }
@@ -222,15 +247,15 @@ fn a_full_span_record_is_the_span() {
         span.attributes,
         vec![
             typed("thread.id", any_value::Value::IntValue(3)),
-            kv("target", "busbar::proxy::engine"),
-            kv("request_id", "7"),
+            kv("busbar.target", "busbar::proxy::engine"),
+            kv("busbar.request_id", "7"),
             typed(
                 "e.chain",
                 any_value::Value::ArrayValue(ArrayValue {
                     values: vec![text("a"), text("b")],
                 }),
             ),
-            typed("busy_ns", any_value::Value::IntValue(0)),
+            typed("busbar.busy_ns", any_value::Value::IntValue(0)),
         ]
     );
     assert_eq!(
@@ -238,7 +263,7 @@ fn a_full_span_record_is_the_span() {
         vec![Event {
             time_unix_nano: 1_000_000_200,
             name: "broke".into(),
-            attributes: vec![kv("level", "ERROR")],
+            attributes: vec![kv("busbar.level", "ERROR")],
             ..Default::default()
         }]
     );
@@ -775,7 +800,10 @@ fn projected_attribute_and_time_edges() {
     let span = span_of(&record).expect("a span");
     assert_eq!(
         span.attributes,
-        vec![kv("ingress", "i"), kv("op", "18446744073709551615")]
+        vec![
+            kv("busbar.ingress", "i"),
+            kv("busbar.op", "18446744073709551615")
+        ]
     );
     assert_eq!(span.start_time_unix_nano, u64::MAX);
     assert_eq!(span.end_time_unix_nano, u64::MAX);
@@ -789,9 +817,9 @@ fn projected_attribute_and_time_edges() {
     assert_eq!(
         span.attributes,
         vec![
-            kv("big", "9223372036854775808"),
+            kv("busbar.big", "9223372036854775808"),
             KeyValue {
-                key: "max".into(),
+                key: "busbar.max".into(),
                 value: Some(AnyValue {
                     value: Some(any_value::Value::IntValue(i64::MAX)),
                 }),
@@ -831,7 +859,7 @@ fn a_null_attribute_is_omitted_and_a_null_array_item_is_an_empty_any_value() {
     })))
     .unwrap();
     let keys: Vec<&str> = span.attributes.iter().map(|a| a.key.as_str()).collect();
-    assert_eq!(keys, ["kept", "arr"], "{:?}", span.attributes);
+    assert_eq!(keys, ["busbar.kept", "busbar.arr"], "{:?}", span.attributes);
     let Some(any_value::Value::ArrayValue(array)) = span.attributes[1].value.clone().unwrap().value
     else {
         panic!("an array value");
@@ -1012,7 +1040,7 @@ fn nonfinite_marker_collisions_remain_text() {
             "attributes": [{"key": "ordinary", "value": value}],
         })))
         .expect("a span");
-        assert_eq!(span.attributes, vec![kv("ordinary", &expected)]);
+        assert_eq!(span.attributes, vec![kv("busbar.ordinary", &expected)]);
     }
 }
 

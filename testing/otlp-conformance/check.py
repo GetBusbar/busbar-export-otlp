@@ -41,10 +41,22 @@ def sid(x):
 
 
 def kvs(lst):
-    out = []
+    eligible = []
     for kv in lst or []:
         if isinstance(kv, dict) and isinstance(kv.get("key"), str) and kv.get("value") is not None:
-            out.append((kv["key"], val(kv["value"])))
+            eligible.append((kv["key"], val(kv["value"])))
+    # Independent documented naming rule: qualified keys stay unchanged; bare
+    # Busbar fields receive the busbar namespace. A collision preserves both.
+    occupied = {name for name, _ in eligible if "." in name}
+    out = []
+    for key, value in eligible:
+        name = key if "." in key else "busbar." + key
+        if "." not in key and name in occupied:
+            name = "busbar.original." + key.encode().hex()
+            while name in occupied:
+                name += ".original"
+        occupied.add(name)
+        out.append((name, value))
     return out
 
 
@@ -75,7 +87,7 @@ def expected(fixture):
                 status=(2, st.get("message") or "") if err else (0, "")))
         else:
             start = int(r.get("start") or 0) * 1000
-            attrs = [(k, val(r[k])) for k in ATTRS if r.get(k) is not None]
+            attrs = [("busbar." + k, val(r[k])) for k in ATTRS if r.get(k) is not None]
             spans.append(dict(
                 trace="0" * 16 + t, span=s, parent=p, name=r.get("name") or "", kind=1,
                 start=start, end=start + int(r.get("duration_us") or 0) * 1000,

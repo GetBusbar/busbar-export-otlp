@@ -237,8 +237,18 @@ fn key_value(key: &str, value: &str) -> KeyValue {
 /// A `KeyValue { key, value: AnyValue { value } }`.
 fn key_value_of(key: &str, value: AnyValueKind) -> KeyValue {
     KeyValue {
-        key: key.to_string(),
+        key: attribute_key(key),
         value: Some(AnyValue { value: Some(value) }),
+    }
+}
+
+/// OTel attributes have a namespace. Preserve already qualified standard/custom
+/// keys and place Busbar's bare tracing/projected fields in its own namespace.
+fn attribute_key(key: &str) -> String {
+    if key.contains('.') {
+        key.to_string()
+    } else {
+        format!("busbar.{key}")
     }
 }
 
@@ -284,12 +294,39 @@ fn any_value(value: &Value) -> Option<AnyValueKind> {
 
 /// `[{key, value}, …]` as `KeyValue`s, in order.
 fn key_values(list: Option<&Value>) -> Vec<KeyValue> {
-    list.and_then(Value::as_array)
+    let attributes: Vec<_> = list
+        .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|kv| {
             let key = kv.get(span_record::KEY)?.as_str()?;
-            Some(key_value_of(key, any_value(kv.get(span_record::VALUE)?)?))
+            Some((key, any_value(kv.get(span_record::VALUE)?)?))
+        })
+        .collect();
+    let mut occupied: std::collections::BTreeSet<_> = attributes
+        .iter()
+        .filter(|(key, _)| key.contains('.'))
+        .map(|(key, _)| key.to_string())
+        .collect();
+    attributes
+        .into_iter()
+        .map(|(key, value)| {
+            let mut name = attribute_key(key);
+            if !key.contains('.') && occupied.contains(&name) {
+                // A caller can supply both `pool` and `busbar.pool`. Never merge or
+                // overwrite them: the original UTF-8 key is reversibly hex encoded.
+                let encoded: String = key
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                name = format!("busbar.original.{encoded}");
+                while occupied.contains(&name) {
+                    name.push_str(".original");
+                }
+            }
+            occupied.insert(name.clone());
+            key_value_of(&name, value)
         })
         .collect()
 }

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Custom product metadata, not OpenTelemetry standard semantic conventions.
+groups:
+  - id: registry.busbar
+    type: attribute_group
+    brief: Busbar projected fields and caller-defined Rust tracing fields.
+    attributes:
+      - id: busbar
+        type: template[any]
+        stability: development
+        brief: A custom Busbar tracing or projected field, preserving its source value type.
+        note: >
+          Busbar carries dynamic typed tracing fields. Bare field names receive
+          the busbar namespace; already qualified keys are retained. The suffix
+          original.<hex> preserves a bare key that collides with a supplied
+          qualified name; additional .original suffixes disambiguate collisions.
+          This template does not claim standard OTel meaning or constrain the
+          application-specific value type. Standard qualified attributes retain
+          the upstream registry's own types and semantics.
+        examples: [main, 42, true]
