@@ -66,6 +66,17 @@ const INTERNAL: &str = r#"{"url":"https://collector.internal.example/v1/traces"}
 const PLAINTEXT: &str = r#"{"url":"http://collector.example/v1/traces"}"#;
 const MOVED: &str = r#"{"url":"http://127.0.0.1:4318/v2/traces"}"#;
 
+/// Compose the fixture host's table through the same admission authority as the kernel.
+fn admissions(
+    table: Arc<dyn DeclaredConns>,
+) -> busbar_contract::conn::admissions::AdmissionAuthority {
+    busbar_contract::conn::admissions::AdmissionAuthority::issue(
+        &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+        table,
+        Default::default(),
+    )
+}
+
 /// CI builds this repository's actual cdylib before invoking these tests.
 fn cdylib() -> PathBuf {
     let path = match std::env::var_os("BUSBAR_PLUGIN_CDYLIB") {
@@ -529,7 +540,7 @@ impl Host {
             max_inflight_cap: 64,
             sink,
             dispatcher: self.d.adopter(),
-            conns: ConnTable::Host(conns),
+            conns: ConnTable::Host(admissions(conns)),
         }
     }
 }
@@ -1377,10 +1388,10 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
         let tape = Arc::new(calls::Observed::default());
         let bind = busbar_plugin_loader::dispatch::Bind {
             sink: tape.clone(),
-            conns: ConnTable::Host(suite_host(
+            conns: ConnTable::Host(admissions(suite_host(
                 d.conn_waker(),
                 Some(conformance_host::anchors()),
-            )),
+            ))),
             ..calls::bind(&d, "conformance")
         };
         let p = if dropped {
@@ -1449,8 +1460,10 @@ fn the_linked_and_freshly_built_dropped_otlp_obey_the_export_contract() {
             let actual = String::from_utf8_lossy(c.error.as_ref().unwrap_or_else(|| {
                 panic!("{route} bad settings #{index}: missing refusal text; expected {expected:?}")
             }));
-            assert!(actual.contains(expected),
-                "{route} bad settings #{index}: expected refusal substring {expected:?}, actual {actual:?}");
+            assert!(
+                actual.contains(expected),
+                "{route} bad settings #{index}: expected refusal substring {expected:?}, actual {actual:?}"
+            );
             observed.push(calls::called(&c));
             pin("validate bad", 1);
         }
@@ -1668,7 +1681,10 @@ mod declared_secrets {
                 max_inflight_cap: 64,
                 sink: Arc::new(NoSink),
                 dispatcher: d.adopter(),
-                conns: ConnTable::Host(super::conformance_host::host(Arc::new(|_, _| {}), None)),
+                conns: ConnTable::Host(super::admissions(super::conformance_host::host(
+                    Arc::new(|_, _| {}),
+                    None,
+                ))),
             },
         )
         .expect("the linked door loads")
@@ -1680,8 +1696,12 @@ mod declared_secrets {
 
     #[test]
     fn a_reference_at_each_declared_field_resolves_in_place() {
-        let out = settings_as_the_kernel_resolves(&load(), br#"{"url":{"env":"X"}}"#, resolved)
-            .expect("the declared fields take a reference");
+        let out = settings_as_the_kernel_resolves(
+            &load(),
+            br#"{"url":{"module":"fixture-source","settings":{"key":"X"}}}"#,
+            resolved,
+        )
+        .expect("the declared fields take a reference");
         let v: Value = serde_json::from_slice(&out).expect("json");
         assert_eq!(v["url"], json!("resolved-value"), "{v}");
     }
@@ -1690,7 +1710,7 @@ mod declared_secrets {
     fn a_reference_at_an_undeclared_field_is_refused() {
         let e = settings_as_the_kernel_resolves(
             &load(),
-            br#"{"url":"http://127.0.0.1:4318/v1/traces","nope":{"env":"X"}}"#,
+            br#"{"url":"http://127.0.0.1:4318/v1/traces","nope":{"module":"fixture-source","settings":{"key":"X"}}}"#,
             resolved,
         )
         .expect_err("an undeclared field takes no reference");
