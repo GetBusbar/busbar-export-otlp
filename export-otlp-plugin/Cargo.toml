@@ -50,3 +50,8 @@ prost = { workspace = true, features = ["default"] }
 busbar-transport-tcp = { workspace = true }
 busbar-transport-http = { workspace = true }
 busbar-contract = { workspace = true, features = ["test-seal"] }
+
+[package.metadata.busbar.test-artifacts]
+cdylib = ["BUSBAR_TEST_EXPORT_OTLP_CDYLIB", "BUSBAR_TEST_OTLP_CDYLIB"]
+manifest = ["BUSBAR_TEST_EXPORT_OTLP_MANIFEST"]
+declares = ["BUSBAR_TEST_EXPORT_OTLP_DECLARES"]
