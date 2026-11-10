@@ -1125,3 +1125,7 @@ fn a_userinfo_beside_no_host_or_under_file_is_cut_as_unparsed() {
         assert!(!carries_userinfo(text), "{text}");
     }
 }
+
+#[cfg(test)]
+#[path = "loader_ownership_tests.rs"]
+mod loader_ownership_tests;

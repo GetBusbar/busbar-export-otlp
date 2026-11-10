@@ -664,3 +664,14 @@ pub use table::{door, MACRO_DOOR};
 #[cfg(test)]
 #[path = "door_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod loader_ownership_tests {
+    #[test]
+    fn loader_owned_trace_stream_contract() {
+        assert_eq!(
+            super::STREAMS,
+            &[busbar_contract::abi::export::ExportStream::Traces as u8]
+        );
+    }
+}
