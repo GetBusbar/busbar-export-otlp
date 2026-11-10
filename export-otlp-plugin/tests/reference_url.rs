@@ -59,11 +59,12 @@ fn the_url_is_not_declared_secret() {
 #[test]
 fn a_reference_at_the_url_resolves_as_the_kernel_resolves_it() {
     let (p, _d) = linked();
-    let out =
-        settings_as_the_kernel_resolves(&p, br#"{"url":{"env":"REFCAP_URL_FOR_TEST"}}"#, |_, _| {
-            Ok(URL.to_string())
-        })
-        .expect("a reference at the url resolves");
+    let out = settings_as_the_kernel_resolves(
+        &p,
+        br#"{"url":{"module":"fixture-source","settings":{"key":"collector-url"}}}"#,
+        |_, _| Ok(URL.to_string()),
+    )
+    .expect("a reference at the url resolves");
     let v: serde_json::Value = serde_json::from_slice(&out).expect("json");
     assert_eq!(v["url"], URL);
 }

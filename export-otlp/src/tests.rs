@@ -1106,13 +1106,13 @@ fn settings_schema_matches_lifecycle() {
         );
     }
     for (reference, accepted) in [
-        (json!({"env":"OTLP_URL"}), true),
-        (json!({"file":"/run/secrets/otlp-url"}), true),
+        (json!({"env":"OTLP_URL"}), false),
+        (json!({"file":"/run/secrets/otlp-url"}), false),
         (
-            json!({"module":"vault", "settings":{"key":"collector"}}),
+            json!({"module":"fixture-source", "settings":{"key":"collector"}}),
             true,
         ),
-        (json!({"module":"vault"}), true),
+        (json!({"module":"fixture-source"}), true),
         (json!({"env":" "}), false),
         (json!({"module":""}), false),
         (json!({"env":"X", "extra":true}), false),

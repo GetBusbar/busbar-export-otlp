@@ -882,16 +882,17 @@ fn full_span_records_reach_the_collector_through_both_export_instances() {
         assert_eq!(
             attributes[..5],
             [
-                ("pool", AnyValue::StringValue("p1".into())),
+                ("busbar.pool", AnyValue::StringValue("p1".into())),
                 (
-                    "request_id",
+                    "busbar.request_id",
                     AnyValue::StringValue("9007199254740993".into())
                 ),
-                ("attempt", AnyValue::IntValue(2)),
-                ("cached", AnyValue::BoolValue(false)),
-                ("latency", AnyValue::DoubleValue(1.25)),
+                ("busbar.attempt", AnyValue::IntValue(2)),
+                ("busbar.cached", AnyValue::BoolValue(false)),
+                ("busbar.latency", AnyValue::DoubleValue(1.25)),
             ]
         );
+        assert_eq!(attributes[5].0, "busbar.retries");
         match &attributes[5].1 {
             AnyValue::ArrayValue(values) => assert_eq!(
                 values
@@ -914,8 +915,8 @@ fn full_span_records_reach_the_collector_through_both_export_instances() {
             full["events"][0]["time_ns"].as_u64().unwrap()
         );
         assert_eq!(event.attributes.len(), 2);
-        assert_eq!(event.attributes[0].key, "level");
-        assert_eq!(event.attributes[1].key, "code");
+        assert_eq!(event.attributes[0].key, "busbar.level");
+        assert_eq!(event.attributes[1].key, "busbar.code");
         assert_eq!(
             event.attributes[0].value.as_ref().unwrap().value,
             Some(AnyValue::StringValue("ERROR".into()))
