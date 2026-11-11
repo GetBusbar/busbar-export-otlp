@@ -30,3 +30,10 @@ directory beside the intact comparison and negative-control evidence.
 `test_command.py` contains normal Python unittest regressions for output/status
 preservation, timeout and TERM cleanup. It is separate from the real-collector
 suite and introduces no CI check or alternate conformance verdict.
+
+In protected native CI, the controller stages the exact image-pinned Collector
+and telemetrygen binaries read-only at `/opt/busbar-conformance/otlp/`. The suite
+runs them on the candidate's private loopback (4317/4318) and writes fresh signal
+files beneath its output directory. It never opens a Docker socket or downloads
+images in that mode. The same control, negative controls and subject comparison
+apply; missing staged tools fail the required suite.

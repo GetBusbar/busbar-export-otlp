@@ -60,6 +60,12 @@ RUN="otlpconf-$$-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 [ "$RUN" != "otlpconf-$$-" ] || { verdict fail true "no random run id for the docker names"; exit 1; }
 NET="$RUN"
 CONTAINERS=()
+COLLECTOR_PIDS=()
+# The controller validates and mounts these exact public tools read-only. In an
+# isolated candidate their peers use only its private loopback namespace.
+NATIVE_TOOLS=/opt/busbar-conformance/otlp
+NATIVE=0
+if [ -n "${CONFORMANCE_CAPABILITIES+x}" ]; then NATIVE=1; fi
 NETWORK_REGISTERED=0
 RUNNING_TOOL=
 run_tool() {
@@ -79,6 +85,13 @@ cleanup() {
     wait "$RUNNING_TOOL" 2>/dev/null || :
     RUNNING_TOOL=
   fi
+  for c in "${COLLECTOR_PIDS[@]:-}"; do
+    if [ -n "$c" ]; then
+      kill -TERM "$c" 2>/dev/null || :
+      kill -KILL "$c" 2>/dev/null || :
+      wait "$c" 2>/dev/null || :
+    fi
+  done
   for c in "${CONTAINERS[@]:-}"; do
     if [ -n "$c" ]; then
       log="$OUT/work/cleanup-$c.log"
@@ -121,14 +134,53 @@ interrupted() {
 trap 'interrupted INT 130' INT
 trap 'interrupted TERM 143' TERM
 
-command -v docker >/dev/null || { verdict fail true "docker is absent; the collector cannot run"; exit 1; }
 mkdir -p "$OUT/work" || exit 1
-NETWORK_REGISTERED=1
-run_tool docker network create "$NET" >/dev/null || { verdict fail true "docker network create failed"; exit 1; }
+if [ "$NATIVE" = 1 ]; then
+  for tool in otelcol-contrib telemetrygen; do
+    [ -f "$NATIVE_TOOLS/$tool" ] && [ ! -L "$NATIVE_TOOLS/$tool" ] && [ -x "$NATIVE_TOOLS/$tool" ] \
+      || { verdict fail true "the controller did not stage the pinned $tool executable"; exit 1; }
+  done
+else
+  command -v docker >/dev/null || { verdict fail true "docker is absent; the collector cannot run"; exit 1; }
+  NETWORK_REGISTERED=1
+  run_tool docker network create "$NET" >/dev/null || { verdict fail true "docker network create failed"; exit 1; }
+fi
 
 # collector_start <name>: a fresh collector; sets PORT (host-published OTLP/HTTP).
 collector_start() {
   local name="$RUN-$1"
+  if [ "$NATIVE" = 1 ]; then
+    local dir="$OUT/work/$1"
+    mkdir -p "$dir" || return 1
+    python3 -I - "$HERE/collector.yaml" "$dir" <<'PYCONFIG' || return 1
+import json, pathlib, sys
+source, directory = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).resolve()
+config = source.read_text().replace("0.0.0.0:", "127.0.0.1:")
+for signal in ("traces", "metrics", "logs"):
+    # JSON strings are valid YAML scalars, including paths with whitespace.
+    config = config.replace("/" + signal + ".json", json.dumps(str(directory / (signal + ".json"))))
+(directory / "collector.yaml").write_text(config)
+PYCONFIG
+    "$NATIVE_TOOLS/otelcol-contrib" --config "$dir/collector.yaml" > "$dir/collector.log" 2>&1 &
+    COLLECTOR_PID=$!
+    COLLECTOR_PIDS+=("$COLLECTOR_PID")
+    PORT=4318
+    local deadline=$((SECONDS + READINESS_TIMEOUT_SECONDS))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      if ! kill -0 "$COLLECTOR_PID" 2>/dev/null; then
+        wait "$COLLECTOR_PID" 2>/dev/null || :
+        COLLECTOR_PIDS=()
+        cat "$dir/collector.log" >&2
+        return 1
+      fi
+      if curl -s --connect-timeout 1 --max-time 1 -o /dev/null -X POST -H 'content-type: application/json' -d '{}' "http://127.0.0.1:$PORT/v1/traces"; then return 0; fi
+      sleep "$READINESS_POLL_SECONDS"
+    done
+    kill -KILL "$COLLECTOR_PID" 2>/dev/null || :
+    wait "$COLLECTOR_PID" 2>/dev/null || :
+    COLLECTOR_PIDS=()
+    return 1
+  fi
   CONTAINERS+=("$name")
   run_tool docker create --name "$name" --network "$NET" --network-alias collector --user 0:0 \
     -p 127.0.0.1::4318 "$COLLECTOR_IMAGE" --config /conf.yaml >/dev/null || return 1
@@ -154,6 +206,23 @@ collector_finish() {
   shift 2
   mkdir -p "$dir" || return 1
   sleep "$COLLECTOR_FLUSH_SECONDS"
+  if [ "$NATIVE" = 1 ]; then
+    kill -TERM "$COLLECTOR_PID" 2>/dev/null || failed=1
+    local deadline=$((SECONDS + COLLECTOR_STOP_SECONDS))
+    while kill -0 "$COLLECTOR_PID" 2>/dev/null; do
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        kill -KILL "$COLLECTOR_PID" 2>/dev/null || :
+        failed=1
+        break
+      fi
+      sleep 0.1
+    done
+    wait "$COLLECTOR_PID" || failed=1
+    # Never leave a reaped PID available for cleanup to signal after PID reuse.
+    COLLECTOR_PIDS=()
+    for f in "$@"; do [ -f "$dir/$f.json" ] || failed=1; done
+    return "$failed"
+  fi
   if ! run_tool docker stop -t "$COLLECTOR_STOP_SECONDS" "$name" > "$dir/stop.log" 2>&1; then
     cat "$dir/stop.log" >&2
     failed=1
@@ -176,18 +245,24 @@ CHECK=(python3 -I "$HERE/check.py")
 
 # ---- CONTROL: telemetrygen -> collector, over HTTP and gRPC, all three signals -------------------
 say "control: telemetrygen $TELEMETRYGEN_VERSION -> collector $COLLECTOR_VERSION"
-if ! run_tool docker pull -q "$COLLECTOR_IMAGE" >/dev/null || ! run_tool docker pull -q "$TELEMETRYGEN_IMAGE" >/dev/null; then
+if [ "$NATIVE" = 0 ] && { ! run_tool docker pull -q "$COLLECTOR_IMAGE" >/dev/null || ! run_tool docker pull -q "$TELEMETRYGEN_IMAGE" >/dev/null; }; then
   verdict fail true "the pinned collector or telemetrygen image could not be pulled"; exit 1
 fi
 if collector_start control; then
   for proto in http grpc; do
     flag=(--otlp-insecure)
     if [ "$proto" = grpc ]; then ep=collector:4317; else ep=collector:4318; flag+=(--otlp-http); fi
+    if [ "$NATIVE" = 1 ]; then ep="${ep/collector/127.0.0.1}"; fi
     for sig in traces metrics logs; do
       count=(--"$sig" 5)
       generator="$RUN-telemetrygen-$proto-$sig"
-      CONTAINERS+=("$generator")
-      run_tool docker run --rm --name "$generator" --network "$NET" "$TELEMETRYGEN_IMAGE" "$sig" --otlp-endpoint "$ep" "${flag[@]}" \
+      if [ "$NATIVE" = 1 ]; then
+        generator_command=("$NATIVE_TOOLS/telemetrygen")
+      else
+        CONTAINERS+=("$generator")
+        generator_command=(docker run --rm --name "$generator" --network "$NET" "$TELEMETRYGEN_IMAGE")
+      fi
+      run_tool "${generator_command[@]}" "$sig" --otlp-endpoint "$ep" "${flag[@]}" \
         --service "ctl-$proto" "${count[@]}" --rate 0 >"$OUT/work/telemetrygen-$proto-$sig.log" 2>&1 \
         || note "control: telemetrygen $sig over $proto failed ($(tail -1 "$OUT/work/telemetrygen-$proto-$sig.log"))"
     done

@@ -43,3 +43,9 @@ Primary sources:
 - https://github.com/open-telemetry/weaver/tree/v0.28.0
 - https://github.com/open-telemetry/weaver/blob/v0.28.0/src/registry/live_check.rs
 - https://github.com/open-telemetry/semantic-conventions/tree/fb30ca17193b551473b1f43c315482918ab6987c
+
+Protected native CI supplies the pinned Weaver executable and semantic-convention
+model read-only under `/opt/busbar-conformance/weaver/{weaver,registry}`. With the
+controller capability manifest present, provisioning is strictly offline and
+missing staged inputs fail; the official live-check policy and controls are
+unchanged.

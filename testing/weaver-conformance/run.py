@@ -64,6 +64,13 @@ def unpack(archive, destination):
 
 
 def provision(work):
+    if "CONFORMANCE_CAPABILITIES" in os.environ:
+        root = Path("/opt/busbar-conformance/weaver")
+        tool, registry = root / "weaver", root / "registry"
+        if (tool.is_symlink() or not tool.is_file() or not os.access(tool, os.X_OK)
+                or registry.is_symlink() or not registry.is_dir()):
+            raise ValueError("controller did not stage the pinned offline Weaver inputs")
+        return tool, registry
     triple, sha = TOOLS[(platform.system(), platform.machine())]
     archive = work / "weaver.tar.xz"
     fetch(f"https://github.com/open-telemetry/weaver/releases/download/v{VERSION}/weaver-{triple}.tar.xz", sha, archive)

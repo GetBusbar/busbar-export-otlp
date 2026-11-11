@@ -56,6 +56,23 @@ class Samples(unittest.TestCase):
             with self.assertRaises(ValueError):
                 rig.any_value(value)
 
+    def test_confined_provision_uses_staged_inputs_without_network(self):
+        (self.root / "weaver").write_text("instrument")
+        (self.root / "weaver").chmod(0o555)
+        (self.root / "registry").mkdir()
+        with patch.dict(os.environ, {"CONFORMANCE_CAPABILITIES": "/controller.json"}), \
+                patch.object(rig, "Path", return_value=self.root), \
+                patch.object(rig, "fetch", side_effect=AssertionError("network forbidden")):
+            self.assertEqual(rig.provision(self.root),
+                             (self.root / "weaver", self.root / "registry"))
+
+    def test_missing_confined_inputs_fail_without_download_fallback(self):
+        with patch.dict(os.environ, {"CONFORMANCE_CAPABILITIES": "/controller.json"}), \
+                patch.object(rig, "Path", return_value=self.root), \
+                patch.object(rig, "fetch", side_effect=AssertionError("network forbidden")):
+            with self.assertRaisesRegex(ValueError, "pinned offline"):
+                rig.provision(self.root)
+
     def test_empty_official_report_cannot_pass(self):
         report = self.root / "subject"
         report.mkdir()
