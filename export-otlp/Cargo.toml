@@ -45,3 +45,9 @@ prost = { workspace = true, features = ["default"] }
 # Standard base64, the suite's independent check of the Basic credential the SDK encodes. Test-only.
 base64 = { workspace = true }
 busbar-contract = { workspace = true, features = ["test-seal"] }
+# The Weaver conformance rig (testing/weaver-conformance/rig.rs, compiled into this test target like
+# the collector driver): the SHA-256 pin of each instrument archive, its gzip layer, and member-by-member
+# tar validation before extraction. Test-only.
+sha2 = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }

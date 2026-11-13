@@ -29,7 +29,19 @@ preservation remains the separate `otlp` suite's responsibility.
 Raw official reports, unchanged converted samples, source capture digest and the
 assessment are written under `CONFORMANCE_OUT/evidence`. These are synthetic
 fixture samples, not production telemetry. The full evaluation runs in CI.
-Targeted local adapter tests: `python3 -B -I testing/weaver-conformance/test_run.py`.
+The suite command is `bash testing/weaver-conformance/run.sh`. The evaluation is the Rust rig
+`rig.rs`, compiled into busbar-export-otlp's test target with the workspace lock (as the collector
+driver is) and run as its ignored `weaver_rig::weaver_conformance` test. Targeted local rig tests:
+`cargo test -p busbar-export-otlp --lib weaver_rig`.
+
+Outside protected CI the rig downloads both archives over HTTPS only (curl; `xz` decompresses
+the Weaver release) and verifies each SHA-256 pin before opening it. Every member of the
+decompressed tar stream is then listed and the archive is refused unless all members are regular
+files or directories with relative, normal-component paths totalling at most 512 MiB (pax global
+headers are metadata and never unpacked). Symlinks, hard links, devices, FIFOs, absolute paths and
+`..` components refuse the whole archive before anything is extracted. Only then is a fresh
+directory created and the members unpacked into it, confined to it, without ownership,
+setuid/setgid/sticky bits, group/world write or extended attributes.
 
 The exporter places bare projected/tracing attribute keys in `busbar.*`; qualified
 standard/custom keys keep their names. All values retain their original types.

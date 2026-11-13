@@ -438,39 +438,47 @@ fn the_small_encoders_match_their_standards() {
 /// untouched and authenticates with nothing.
 #[test]
 fn every_shape_of_userinfo_leaves_the_url_for_a_basic_header() {
+    // Obviously synthetic userinfo, and each expected header built at runtime by the independent
+    // `base64` crate (itself pinned to RFC 4648 vectors below): no credential-shaped literal.
+    let (user, pass) = ("test-only-user", "test-only-pass");
+    let basic = |userinfo: String| Some(format!("Basic {}", base64(userinfo.as_bytes())));
     let cases = [
         (
-            "https://alice:s3cr3t@collector.example.com:4318/v1/traces",
+            format!("https://{user}:{pass}@collector.example.com:4318/v1/traces"),
             "https://collector.example.com:4318/v1/traces",
-            Some("Basic YWxpY2U6czNjcjN0"),
+            basic(format!("{user}:{pass}")),
         ),
         (
-            "https://:topsecret@host:4318/v1/traces",
+            format!("https://:{pass}@host:4318/v1/traces"),
             "https://host:4318/v1/traces",
-            Some("Basic OnRvcHNlY3JldA=="),
+            basic(format!(":{pass}")),
         ),
         (
-            "https://tokenuser@host:4318/v1/traces",
+            format!("https://{user}@host:4318/v1/traces"),
             "https://host:4318/v1/traces",
-            Some("Basic dG9rZW51c2VyOg=="),
+            basic(format!("{user}:")),
         ),
         (
-            "https://u:p%40ss%3Aword@host/v1/traces",
+            format!("https://{user}:{pass}%40with%3Aescapes@host/v1/traces"),
             "https://host/v1/traces",
-            Some("Basic dTpwQHNzOndvcmQ="),
+            basic(format!("{user}:{pass}@with:escapes")),
         ),
         (
-            "https://collector.example.com:4318/v1/traces",
+            "https://collector.example.com:4318/v1/traces".to_string(),
             "https://collector.example.com:4318/v1/traces",
             None,
         ),
-        ("http://localhost:4318", "http://localhost:4318", None),
+        (
+            "http://localhost:4318".to_string(),
+            "http://localhost:4318",
+            None,
+        ),
     ];
     for (endpoint, clean, authorization) in cases {
-        let (got_clean, got_auth) = split_credentials(endpoint);
+        let (got_clean, got_auth) = split_credentials(&endpoint);
         assert_eq!(
             (got_clean.as_str(), got_auth.as_deref()),
-            (clean, authorization),
+            (clean, authorization.as_deref()),
             "{endpoint}"
         );
     }

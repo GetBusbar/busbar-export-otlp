@@ -1,2 +1,2 @@
 otlp	bash testing/otlp-conformance/run.sh
-otel-semconv-weaver	python3 -I testing/weaver-conformance/run.py
+otel-semconv-weaver	bash testing/weaver-conformance/run.sh

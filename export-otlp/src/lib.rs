@@ -263,3 +263,7 @@ pub use door::{door, MACRO_DOOR};
 #[cfg(test)]
 #[path = "../../testing/otlp-conformance/driver/main.rs"]
 mod conformance_driver;
+
+#[cfg(test)]
+#[path = "../../testing/weaver-conformance/rig.rs"]
+mod weaver_rig;
